@@ -57,6 +57,18 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
+#define SHUTDOWN_Pin GPIO_PIN_13
+#define SHUTDOWN_GPIO_Port GPIOC
+#define ADC_Temp_Pin GPIO_PIN_0
+#define ADC_Temp_GPIO_Port GPIOC
+#define ADC_U_Pin GPIO_PIN_1
+#define ADC_U_GPIO_Port GPIOC
+#define ADC_V_Pin GPIO_PIN_2
+#define ADC_V_GPIO_Port GPIOC
+#define ADC_W_Pin GPIO_PIN_3
+#define ADC_W_GPIO_Port GPIOC
+#define ADC_VBUS_Pin GPIO_PIN_3
+#define ADC_VBUS_GPIO_Port GPIOA
 #define PM1_PWM_UL_Pin GPIO_PIN_13
 #define PM1_PWM_UL_GPIO_Port GPIOB
 #define PM1_PWM_VL_Pin GPIO_PIN_14
@@ -69,6 +81,10 @@ void Error_Handler(void);
 #define PM__PWM_VH_GPIO_Port GPIOA
 #define PM1_PWM_WH_Pin GPIO_PIN_10
 #define PM1_PWM_WH_GPIO_Port GPIOA
+#define LED1_Pin GPIO_PIN_0
+#define LED1_GPIO_Port GPIOE
+#define LED0_Pin GPIO_PIN_1
+#define LED0_GPIO_Port GPIOE
 
 /* USER CODE BEGIN Private defines */
 

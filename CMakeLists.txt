@@ -33,9 +33,11 @@ enable_language(C ASM)
 
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME}
-        Lib/Src/posUpdata.c
+        Lib/Src/encoder.c
         Lib/Src/FOC_Math.c
-        Lib/Src/controller.c)
+        Lib/Src/FOC_Control.c
+        Lib/Src/PID_Control.c
+        )
 
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)

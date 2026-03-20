@@ -19,12 +19,17 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "adc.h"
+#include "dma.h"
 #include "tim.h"
+#include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "FOC_Math.h"
+#include "FOC_Control.h"
+#include "encoder.h"
+#include "PID_Control.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -88,10 +93,15 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_TIM1_Init();
   MX_ADC1_Init();
+  MX_USART3_UART_Init();
   /* USER CODE BEGIN 2 */
-
+  Control_Loop_Init();
+  adc_foc_init();
+  Motor_Enable();
+  Encoder_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -101,6 +111,14 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
+    static uint32_t last_request = 0;
+    if (HAL_GetTick() - last_request >= 1) {
+      last_request = HAL_GetTick();
+
+      Encoder_Position_Request(ENCODER_ID);
+    }
+
   }
   /* USER CODE END 3 */
 }

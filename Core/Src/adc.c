@@ -21,9 +21,6 @@
 #include "adc.h"
 
 /* USER CODE BEGIN 0 */
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
 
 /* USER CODE END 0 */
 
@@ -173,15 +170,15 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* adcHandle)
     PC3     ------> ADC1_IN9
     PA3     ------> ADC1_IN4
     */
-    GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3;
+    GPIO_InitStruct.Pin = ADC_Temp_Pin|ADC_U_Pin|ADC_V_Pin|ADC_W_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Pin = GPIO_PIN_3;
+    GPIO_InitStruct.Pin = ADC_VBUS_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    HAL_GPIO_Init(ADC_VBUS_GPIO_Port, &GPIO_InitStruct);
 
     /* ADC1 interrupt Init */
     HAL_NVIC_SetPriority(ADC1_2_IRQn, 0, 0);
@@ -210,9 +207,9 @@ void HAL_ADC_MspDeInit(ADC_HandleTypeDef* adcHandle)
     PC3     ------> ADC1_IN9
     PA3     ------> ADC1_IN4
     */
-    HAL_GPIO_DeInit(GPIOC, GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3);
+    HAL_GPIO_DeInit(GPIOC, ADC_Temp_Pin|ADC_U_Pin|ADC_V_Pin|ADC_W_Pin);
 
-    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_3);
+    HAL_GPIO_DeInit(ADC_VBUS_GPIO_Port, ADC_VBUS_Pin);
 
     /* ADC1 interrupt Deinit */
     HAL_NVIC_DisableIRQ(ADC1_2_IRQn);
@@ -232,10 +229,10 @@ int8_t adc_start_err = 0;
 int8_t adc_timeout_err = 0;
 int8_t adc_restor_fail = 0;
 
-static int safe_injected_start(ADC_HandleTypeDef *hadc, uint32_t max_retries)
+static int safe_injected_start(ADC_HandleTypeDef *hadc)
 {
     uint32_t retries = 0;
-    while (retries++ < max_retries)
+    while (retries++ < SAFE_INJECT_MAX_RETRIES)
     {
         // 若注入仍在进行，先尝试停止
         if (hadc->Instance->CR & ADC_CR_JADSTART)
@@ -286,16 +283,12 @@ void calibrate_current_offset(void)
     config.InjectedChannel = ADC_CHANNEL_4; config.InjectedRank = ADC_INJECTED_RANK_4;
     HAL_ADCEx_InjectedConfigChannel(&hadc1, &config);
 
-    // 可选：再次校准 (通常初始化时做过一次即可，这里为了保险可以再做一次)
-    // HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
-
-    // 4. 采集样本
-    int32_t sum[3] = {0};
+    uint32_t sum[3] = {0};
     const uint16_t CALIB_SAMPLES = 128;
 
     for (uint16_t i = 0; i < CALIB_SAMPLES; i++)
     {
-        if (safe_injected_start(&hadc1, 2) != 0)
+        if (safe_injected_start(&hadc1) != 0)
         {
             adc_start_err = 0x01;
             continue;
@@ -317,8 +310,6 @@ void calibrate_current_offset(void)
     g_adc_offset[0] = sum[0] / CALIB_SAMPLES;
     g_adc_offset[1] = sum[1] / CALIB_SAMPLES;
     g_adc_offset[2] = sum[2] / CALIB_SAMPLES;
-
-    // printf("Calib Done: %d, %d, %d\r\n", g_adc_offset[0], g_adc_offset[1], g_adc_offset[2]);
 
     // 5. 恢复硬件触发配置
     config.InjectedSamplingTime = ADC_SAMPLETIME_12CYCLES_5;
@@ -343,18 +334,17 @@ void calibrate_current_offset(void)
     if (HAL_ADCEx_InjectedStart_IT(&hadc1) != HAL_OK)
     {
         adc_restor_fail = 0x03;
-        // 如果启动失败，可能需要 Error_Handler() 或重试
+
     }
 }
 
-// ----- 数据处理核心函数 -----
 void ad_sample_process(void)
 {
     // 1. 读取原始值 (顺序对应 Rank 1~4)
-    int16_t u_raw = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_1);
-    int16_t v_raw = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_2);
-    int16_t w_raw = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_3);
-    int16_t vbus_raw = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_4);
+    uint32_t u_raw = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_1);
+    uint32_t v_raw = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_2);
+    uint32_t w_raw = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_3);
+    uint32_t vbus_raw = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_4);
 
     // 2. 减去零点偏移
     int16_t ia_raw = u_raw - g_adc_offset[0];
@@ -379,10 +369,9 @@ void ad_sample_process(void)
     g_adc_current[1] -= mid_offset;
     g_adc_current[2] -= mid_offset;
 
-    // 6. 调用 FOC 控制循环 (需确保该函数已定义)
-    // Current_Control_Loop();
-    // 注意：如果 Current_Control_Loop 在别的文件，记得包含头文件
-    // 如果还没写这个函数，可以先注释掉，避免编译错误
+    // 6. 调用 FOC 控制循环
+    Control_Loop();
+
 }
 
 // ----- 温度读取 (规则通道) -----
@@ -409,26 +398,24 @@ uint16_t adc_read_regular(uint32_t ch)
 
 float read_temperature(void)
 {
-    // 假设 ADC_VTEMP_CHX 是你定义的宏，比如 ADC_CHANNEL_17 (内部温度传感器) 或某个 GPIO 通道
-    // 如果是内部温度传感器，配置可能不同，这里假设是外部 GPIO 通道
-    // 请替换为你实际的通道号宏，例如 ADC_CHANNEL_6 (如果复用) 或其他
-    // 参考代码中用的是 ADC_VTEMP_CHX，你需要定义它或在 CubeMX 里看是哪个通道
-    #ifndef ADC_VTEMP_CHX
-        #define ADC_VTEMP_CHX ADC_CHANNEL_6 // 临时占位，请修改！
-    #endif
 
-    uint16_t raw = adc_read_regular(ADC_VTEMP_CHX);
+    uint16_t raw = adc_read_regular(ADC_Temp_Pin);
     g_adc_temp = (float)raw; // 或者在这里做温度转换公式
     return g_adc_temp;
 }
 
-// 额外的初始化入口（如果在 MX_ADC1_Init 之后还需要特殊操作）
 void adc_foc_init(void)
 {
-    // CubeMX 的 MX_ADC1_Init() 已经完成了大部分配置
-    // 这里主要用来启动第一次转换或做额外检查
-    // 注意：校准函数 calibrate_current_offset 会重新配置并启动注入中断
-    // 所以通常不需要在这里再调用 HAL_ADCEx_InjectedStart_IT
+  HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
+  calibrate_current_offset();  // 电流零点校准
 }
+
+void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
+{
+  if (hadc->Instance == ADC1) {
+    ad_sample_process();  // 处理 ADC 数据
+  }
+}
+
 /* USER CODE END 1 */
 
