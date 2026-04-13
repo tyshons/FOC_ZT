@@ -9,10 +9,8 @@
 #include "usart.h"
 
 #define PI 3.14159265358979323846f
-#define POLE_PAIRS 23.0f      // 电机极对数
+#define POLE_PAIRS 20.0f      // 电机极对数
 #define ENC_RES 1048576.0f // 编码器分辨率
-#define OFFSET_RAD 0.5236f
-
 
 volatile uint8_t rx_buffer[RX_BUFFER_SIZE];
 const uint8_t tx_buffer[21] = {
@@ -22,65 +20,27 @@ const uint8_t tx_buffer[21] = {
 };
 
 volatile uint8_t rx_complete = 1;
-volatile uint8_t dma_tx_busy = 0;
+volatile uint8_t dma_tx_done = 0;
 volatile uint8_t dma_rx_busy = 0;
-volatile uint32_t last_request_time = 0;
 volatile uint32_t success_count = 0;
 volatile uint32_t error_count = 0;
-volatile uint32_t timeout_count = 0;
 
 Encoder_Data encoder_data = {0, 0.0f, 0};
 
 void Encoder_Init(void) {
   rx_complete = 1;
-  dma_tx_busy = 0;
+  dma_tx_done = 1;
   dma_rx_busy = 0;
 }
 
 void Encoder_Position_Request(uint8_t id) {
-  // if (HAL_GetTick() - last_request_time < 1) {
-  //   return;
-  // }
 
-  if (dma_tx_busy || dma_rx_busy) {
-    return;
-  }
-
-  if (!rx_complete && (HAL_GetTick() - last_request_time > 100)) {
-    timeout_count++;
-
-    HAL_UART_DMAStop(&huart3);
-
-    rx_complete = 1;
-    dma_tx_busy = 0;
-    dma_rx_busy = 0;
-
-    __HAL_UART_CLEAR_FLAG(&huart3, UART_FLAG_ORE);
-    __HAL_UART_CLEAR_FLAG(&huart3, UART_FLAG_NE);
-    __HAL_UART_CLEAR_FLAG(&huart3, UART_FLAG_FE);
-  }
-
-  if (!rx_complete) {
-    return;
-  }
-
-  rx_complete = 0;
-  dma_tx_busy = 0;
-  dma_rx_busy = 0;
-  last_request_time = HAL_GetTick();
-
-  __HAL_UART_CLEAR_FLAG(&huart3, UART_FLAG_TC);
-  __HAL_UART_CLEAR_FLAG(&huart3, UART_FLAG_RXNE);
-  __HAL_UART_CLEAR_FLAG(&huart3, UART_FLAG_ORE);
-  __HAL_UART_CLEAR_FLAG(&huart3, UART_FLAG_NE);
-  __HAL_UART_CLEAR_FLAG(&huart3, UART_FLAG_FE);
-  __HAL_UART_CLEAR_FLAG(&huart3, UART_FLAG_IDLE);
-
-  dma_tx_busy = 1;
-  if (HAL_UART_Transmit_DMA(&huart3, (uint8_t*)tx_buffer, 21) != HAL_OK) {
-    dma_tx_busy = 0;
-    rx_complete = 1;
-    error_count++;
+  if (rx_complete) {
+    rx_complete = 0;
+    dma_tx_done = 0;
+    if (HAL_UART_Transmit_DMA(&huart3, (uint8_t*)tx_buffer, 21) != HAL_OK) {
+      error_count++;
+    }
   }
 }
 
@@ -129,12 +89,12 @@ void Encoder_Position_Receive(void) {
     }
 
     int64_t single_turn_pos = Position % 1048576;
-    encoder_data.position = single_turn_pos;
 
     if (single_turn_pos < 0) {
         single_turn_pos += 1048576;
     }
 
+    encoder_data.position = single_turn_pos;
     int64_t turn_count = Position / 1048576;//圈数
 
     encoder_data.angle = (float)single_turn_pos * 360.0f / 1048576.0f;
@@ -142,17 +102,47 @@ void Encoder_Position_Receive(void) {
 
 }
 
+void Encoder_Speed_Update(void) {
+  static float last_angle = 0.0f;
+  static uint32_t last_time = 0;
+
+  uint32_t current_time = HAL_GetTick();
+  float dt = (float)(current_time - last_time) / 1000.0f;
+
+  if (dt <= 0.0f) return;
+
+  float current_angle = encoder_data.angle;
+  float delta_angle = current_angle - last_angle;
+
+  if (delta_angle > 180.0f)  delta_angle -= 360.0f;
+  if (delta_angle < -180.0f) delta_angle += 360.0f;
+
+  float instant_speed = delta_angle / (dt * 6.0f);
+
+  //一阶低通滤波 y(n) = α * x(n) + (1 - α) * y(n-1)
+  encoder_data.speed = SPEED_FILTER_ALPHA * instant_speed +
+                          (1.0f - SPEED_FILTER_ALPHA) * encoder_data.speed;
+
+  last_angle = current_angle;
+  last_time = current_time;
+}
+
 void Get_Electrical_Angle(float *theta_out) {
+    static float theta_filt = 0.0f;
+    float angle_offset = 247.3f;
 
-  float theta_mech = (encoder_data.position / ENC_RES) * 2.0f * PI;  //将原始值转换为机械角度 (弧度)
-  float theta_elec_raw = theta_mech * POLE_PAIRS;  //乘以极对数得到电角度
-  float theta_elec_offset = theta_elec_raw + OFFSET_RAD;//加上零位偏移
-  float theta_elec = fmodf(theta_elec_offset, 2.0f * PI);//取模
+    float theta_mech = ((encoder_data.angle - angle_offset) / 180.0f) * PI;
 
-  if (theta_elec < 0.0f) {
-    theta_elec += 2.0f * PI;
-  }
-  *theta_out = theta_elec;
+    float theta_elec = theta_mech * POLE_PAIRS;
+
+    theta_elec = fmodf(theta_elec, 2.0f * PI);
+    if (theta_elec < 0) {
+        theta_elec += 2.0f * PI;
+    }
+
+    //theta_filt = 0.8f * theta_elec + 0.2f * theta_filt;
+
+    *theta_out = theta_elec;
 }
 
 
@@ -180,55 +170,21 @@ unsigned int calc_crc32_manual(const unsigned char *buf, unsigned int size) {
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
   if (huart->Instance == USART3) {
-    dma_tx_busy = 0;
-    HAL_GPIO_TogglePin(LED1_GPIO_Port, LED1_Pin);
-
+    dma_tx_done = 1;
+    HAL_GPIO_WritePin(LED1_GPIO_Port, LED1_Pin, GPIO_PIN_RESET);
     dma_rx_busy = 1;
-    if (HAL_UART_Receive_DMA(&huart3, (uint8_t*)rx_buffer, RX_BUFFER_SIZE) != HAL_OK) {
-      dma_rx_busy = 0;
-      rx_complete = 1;
-      error_count++;
+    HAL_UART_Receive_DMA(&huart3, (uint8_t*)rx_buffer, RX_BUFFER_SIZE);
     }
   }
-}
+
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
   if (huart->Instance == USART3) {
     dma_rx_busy = 0;
     rx_complete = 1;
     success_count++;
-
+    HAL_GPIO_WritePin(LED1_GPIO_Port, LED1_Pin, GPIO_PIN_SET);
     Encoder_Position_Receive();
   }
 }
 
-void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
-  if (huart->Instance == USART3) {
-    error_count++;
-
-    dma_tx_busy = 0;
-    dma_rx_busy = 0;
-    rx_complete = 1;
-
-    __HAL_UART_CLEAR_FLAG(&huart3, UART_FLAG_ORE);
-    __HAL_UART_CLEAR_FLAG(&huart3, UART_FLAG_NE);
-    __HAL_UART_CLEAR_FLAG(&huart3, UART_FLAG_FE);
-
-    HAL_UART_AbortReceive(&huart3);
-  }
-}
-
-void UART3_IDLE_Callback(void) {
-  if (__HAL_UART_GET_FLAG(&huart3, UART_FLAG_IDLE) != RESET) {
-    __HAL_UART_CLEAR_FLAG(&huart3, UART_FLAG_IDLE);
-
-    if (dma_rx_busy && !rx_complete) {
-      dma_rx_busy = 0;
-      rx_complete = 1;
-
-      HAL_UART_DMAStop(&huart3);
-
-      Encoder_Position_Receive();
-    }
-  }
-}

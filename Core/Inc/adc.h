@@ -37,9 +37,9 @@ extern "C" {
 extern ADC_HandleTypeDef hadc1;
 
 /* USER CODE BEGIN Private defines */
-#define ALPHA        0.3f
-#define ADC1CURT    (3.3f / 4096.0f / 0.12f)     // 电流转换系数 (A/LSB)
-#define ADC1VOLT    (3.3f * 25.0f / 4096.0f)     // 电压转换系数 (V/LSB)
+#define ALPHA        0.1f
+#define ADC1CURT    (0.03223f)   //ADC电流采集系数 = (3.3f / 4096.0f / 0.025f)
+#define ADC1VOLT    (0.02014f) 	 //ADC电压采集系数 = (3.3f / 4096.0f / 0.0545f)
 #define SAFE_INJECT_MAX_RETRIES 2
 
   extern float g_adc_current[3];   // 三相电流 (A)

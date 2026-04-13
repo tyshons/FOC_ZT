@@ -60,10 +60,10 @@ void svpwm_generate(float u_alpha, float u_beta, float u_dc, uint32_t* CCRA, uin
   // 根据扇区的不同，计算对应的t_a、t_b和t_c的值，表示生成的三相电压的时间
   float T1 = 0.0f, T2=0.0f;
   switch (sector) {
-    case 1: T1 =  Y; T2 =  Z; break;
+    case 1: T1 =  Z; T2 =  Y; break;
     case 2: T1 =  Y; T2 = -X; break;
     case 3: T1 = -Z; T2 =  X; break;
-    case 4: T1 =  Z; T2 =  -X; break;
+    case 4: T1 = -X; T2 =  Z; break;
     case 5: T1 =  X; T2 = -Y; break;
     case 6: T1 = -Y; T2 = -Z; break;
     default:T1 = 0.0f; T2 = 0.0f; break;

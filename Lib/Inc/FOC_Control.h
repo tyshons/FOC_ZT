@@ -9,11 +9,12 @@
 
 #define UDC_VOLTAGE      48.0f
 #define VOLTAGE_LIMIT    ((0.9f * UDC_VOLTAGE) / 1.732f)
-#define INTEGRAL_LIMIT   2.85f
+#define INTEGRAL_LIMIT   20.0f
 
 
 void Motor_Enable();
 void Motor_Disable();
 void Control_Loop(void);
+void Control_Loop_test(void);
 
 #endif //FOC_CONTROLLER_H

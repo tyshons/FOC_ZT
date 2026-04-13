@@ -112,12 +112,12 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-    static uint32_t last_request = 0;
-    if (HAL_GetTick() - last_request >= 1) {
-      last_request = HAL_GetTick();
-
-      Encoder_Position_Request(ENCODER_ID);
-    }
+    // static uint32_t last_request = 0;
+    // if (HAL_GetTick() - last_request >= 1) {
+    //   last_request = HAL_GetTick();
+    //
+    //   Encoder_Position_Request(ENCODER_ID);
+    // }
 
   }
   /* USER CODE END 3 */

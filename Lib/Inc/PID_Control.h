@@ -34,16 +34,9 @@ typedef struct {
   bool anti_windup_enabled;
 } PID_TypeDef;
 
-typedef struct {
-  float in_prev[3];
-  float out_prev[3];
-} pid_state_t;
-
-extern pid_state_t pos_pid_sp;
-extern pid_state_t spd_pid_sp;
-extern pid_state_t iq_pid_sp;
 extern PID_TypeDef position_pid_inst;
 extern PID_TypeDef speed_pid_inst;
+extern PID_TypeDef id_pid_inst;
 extern PID_TypeDef iq_pid_inst;
 
 // 初始化函数
