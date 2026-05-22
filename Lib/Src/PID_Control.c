@@ -12,26 +12,28 @@ PID_TypeDef iq_pid_inst = {0};
 
 void Control_Loop_Init(void) {
   // 初始化位置环 PID
-  PID_Init(&position_pid_inst, 5.0f, 0.5f, 0.1f);
+  PID_Init(&position_pid_inst, 5.0f, 5.0f, 0.0f);
   PID_SetOutputLimits(&position_pid_inst, -1000.0f, 1000.0f); // 速度限幅
   PID_SetIntegralLimit(&position_pid_inst, 100.0f);
   position_pid_inst.low_pass_filter_time_constant = 0.01f; // 10ms 低通滤波
 
   // 初始化速度环 PID
-  PID_Init(&speed_pid_inst, 0.5f, 0.0f, 0.0f);
-  PID_SetOutputLimits(&speed_pid_inst, -8400.0f, 8400.0f); // PWM 限幅
-  PID_SetIntegralLimit(&speed_pid_inst, 500.0f);
+  PID_Init(&speed_pid_inst, 0.007f, 0.01f, 0.0f);
+  PID_SetOutputLimits(&speed_pid_inst, -2.0f, 2.0f); // PWM 限幅
+  PID_SetIntegralLimit(&speed_pid_inst, 5.0f);
   speed_pid_inst.low_pass_filter_time_constant = 0.005f; // 5ms 低通滤波
 
   // 初始化电流环 PID
-  PID_Init(&id_pid_inst, 0.77f, 0.4f, 0.0f);
+  PID_Init(&id_pid_inst, 1.0f, 25.0f, 0.0f);
+  PID_Reset(&id_pid_inst);
   PID_SetOutputLimits(&id_pid_inst, -VOLTAGE_LIMIT, VOLTAGE_LIMIT);
-  PID_SetIntegralLimit(&id_pid_inst, 100);
+  PID_SetIntegralLimit(&id_pid_inst, 30);
   iq_pid_inst.low_pass_filter_time_constant = 0.001f; // 1ms 低通滤波
 
-  PID_Init(&iq_pid_inst, 0.77f, 0.4f, 0.0f);
+  PID_Init(&iq_pid_inst, 1.0f, 25.0f, 0.0f);
+  PID_Reset(&iq_pid_inst);
   PID_SetOutputLimits(&iq_pid_inst, -VOLTAGE_LIMIT, VOLTAGE_LIMIT);
-  PID_SetIntegralLimit(&iq_pid_inst, 100);
+  PID_SetIntegralLimit(&iq_pid_inst, 30);
   iq_pid_inst.low_pass_filter_time_constant = 0.001f; // 1ms 低通滤波
 }
 

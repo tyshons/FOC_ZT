@@ -8,13 +8,14 @@
 #include "PID_Control.h"
 #include "encoder.h"
 #include "FOC_Math.h"
+#include "BISS_C.h"
 #include <stdint.h>
 
 #define PI 3.14159265358979323846f
 
 float open_loop_theta = 0.0f;
-float open_loop_speed = 50.0f;  // 期望转动的电角速度 (rad/s)
-float open_loop_voltage = 2.0f; // 开环电压 (V)，不要给太大，防止发热
+float open_loop_speed = 80.0f;  // 期望转动的电角速度 (rad/s)
+float open_loop_voltage = 5.0f; // 开环电压 (V)，不要给太大，防止发热
 
 // 水平轴（motor_id = 1）
 float current_angle_sp = 0.0f;
@@ -22,7 +23,7 @@ float current_speed_sp = 0.0f;
 float position_given_sp = 100.0f;
 float speed_given_sp = 0.0f;
 float id_given_sp = 0.0f;
-float iq_given_sp = 2.0f;
+float iq_given_sp = 0.0f;
 
 float theta;
 float i_alpha = 0.0f , i_beta = 0.0f;
@@ -32,24 +33,25 @@ float u_alpha, u_beta;
 uint32_t ccrA, ccrB, ccrC;
 
 static uint32_t Get_Time_Us(void) {
-  return __HAL_TIM_GET_COUNTER(&htim1) / 50; // 假设 TIM1 为 10MHz，1tick=0.1us
+  return __HAL_TIM_GET_COUNTER(&htim1) / 25; // 假设 TIM1 为 10MHz，1tick=0.1us
 }
 
 void Control_Loop(void) {
   static uint8_t cnt = 0;
   cnt++;
   uint32_t current_time = Get_Time_Us();
-  Encoder_Position_Request(ENCODER_ID);
-  current_angle_sp = encoder_data.angle;
+  Biss_process(&current_angle_sp);
+  //current_angle_sp = encoder_data.angle;
   Get_Electrical_Angle(&theta);
 
   if (cnt==20) {
     cnt = 0;
-    Encoder_Speed_Update();
-    current_speed_sp = encoder_data.speed;
+    //Encoder_Speed_Update();
+    Encoder_Speed_Update(&current_speed_sp);
+    //current_speed_sp = encoder_data.speed;
     //float position_error = position_given_sp - current_angle_sp;
-    //speed_given_sp = PID_Update(&position_pid_inst,position_error, current_time);
-    //iq_given_sp = PID_Update(&speed_pid_inst,(speed_given_sp - current_speed_sp), current_time);
+    speed_given_sp = PID_Update(&position_pid_inst,(position_given_sp-current_angle_sp), current_time);
+    iq_given_sp = PID_Update(&speed_pid_inst,(speed_given_sp - current_speed_sp), current_time);
   }
 
   float i_a = -g_adc_current[0];
@@ -59,7 +61,7 @@ void Control_Loop(void) {
   clarke_transform(i_a, i_b, i_c, &i_alpha, &i_beta);
   park_transform(i_alpha, i_beta, theta, &i_d, &i_q);
 
-  u_d = PID_Update(&id_pid_inst, (id_given_sp-i_d), current_time);
+  u_d = PID_Update(&id_pid_inst, (id_given_sp-i_d),current_time);
   u_q = PID_Update(&iq_pid_inst,(iq_given_sp-i_q),current_time);
 
   ipark_transform(u_d, u_q, theta, &u_alpha, &u_beta);
@@ -80,7 +82,7 @@ void Control_Loop_test(void) {
   Encoder_Position_Request(ENCODER_ID);
   if (encoder_data.is_valid) {
     current_angle_sp = encoder_data.angle;
-    Encoder_Speed_Update();
+    //Encoder_Speed_Update();
     current_speed_sp = encoder_data.speed;
   }
   Get_Electrical_Angle(&theta);

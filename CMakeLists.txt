@@ -37,7 +37,11 @@ add_executable(${CMAKE_PROJECT_NAME}
         Lib/Src/FOC_Math.c
         Lib/Src/FOC_Control.c
         Lib/Src/PID_Control.c
-        )
+        Lib/Src/BISS_C.c
+        Lib/Inc/BISS_C.h
+        Lib/Src/ssi.c
+        Lib/Inc/ssi.h
+)
 
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)

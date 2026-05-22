@@ -8,7 +8,7 @@
 #include "adc.h"
 
 #define UDC_VOLTAGE      48.0f
-#define VOLTAGE_LIMIT    ((0.9f * UDC_VOLTAGE) / 1.732f)
+#define VOLTAGE_LIMIT    30.0f
 #define INTEGRAL_LIMIT   20.0f
 
 

@@ -102,48 +102,48 @@ void Encoder_Position_Receive(void) {
 
 }
 
-void Encoder_Speed_Update(void) {
-  static float last_angle = 0.0f;
-  static uint32_t last_time = 0;
+// void Encoder_Speed_Update(void) {
+//   static float last_angle = 0.0f;
+//   static uint32_t last_time = 0;
+//
+//   uint32_t current_time = HAL_GetTick();
+//   float dt = (float)(current_time - last_time) / 1000.0f;
+//
+//   if (dt <= 0.0f) return;
+//
+//   float current_angle = encoder_data.angle;
+//   float delta_angle = current_angle - last_angle;
+//
+//   if (delta_angle > 180.0f)  delta_angle -= 360.0f;
+//   if (delta_angle < -180.0f) delta_angle += 360.0f;
+//
+//   float instant_speed = delta_angle / (dt * 6.0f);
+//
+//   //一阶低通滤波 y(n) = α * x(n) + (1 - α) * y(n-1)
+//   encoder_data.speed = SPEED_FILTER_ALPHA * instant_speed +
+//                           (1.0f - SPEED_FILTER_ALPHA) * encoder_data.speed;
+//
+//   last_angle = current_angle;
+//   last_time = current_time;
+// }
 
-  uint32_t current_time = HAL_GetTick();
-  float dt = (float)(current_time - last_time) / 1000.0f;
-
-  if (dt <= 0.0f) return;
-
-  float current_angle = encoder_data.angle;
-  float delta_angle = current_angle - last_angle;
-
-  if (delta_angle > 180.0f)  delta_angle -= 360.0f;
-  if (delta_angle < -180.0f) delta_angle += 360.0f;
-
-  float instant_speed = delta_angle / (dt * 6.0f);
-
-  //一阶低通滤波 y(n) = α * x(n) + (1 - α) * y(n-1)
-  encoder_data.speed = SPEED_FILTER_ALPHA * instant_speed +
-                          (1.0f - SPEED_FILTER_ALPHA) * encoder_data.speed;
-
-  last_angle = current_angle;
-  last_time = current_time;
-}
-
-void Get_Electrical_Angle(float *theta_out) {
-    static float theta_filt = 0.0f;
-    float angle_offset = 247.3f;
-
-    float theta_mech = ((encoder_data.angle - angle_offset) / 180.0f) * PI;
-
-    float theta_elec = theta_mech * POLE_PAIRS;
-
-    theta_elec = fmodf(theta_elec, 2.0f * PI);
-    if (theta_elec < 0) {
-        theta_elec += 2.0f * PI;
-    }
-
-    //theta_filt = 0.8f * theta_elec + 0.2f * theta_filt;
-
-    *theta_out = theta_elec;
-}
+// void Get_Electrical_Angle(float *theta_out) {
+//     static float theta_filt = 0.0f;
+//     float angle_offset = 115.05f;
+//
+//     float theta_mech = ((encoder_data.angle - angle_offset) / 180.0f) * PI;
+//
+//     float theta_elec = theta_mech * 20.0f;
+//
+//     theta_elec = fmodf(theta_elec, 2.0f * PI);
+//     if (theta_elec < 0) {
+//         theta_elec += 2.0f * PI;
+//     }
+//
+//     //theta_filt = 0.8f * theta_elec + 0.2f * theta_filt;
+//
+//     *theta_out = theta_elec;
+// }
 
 
 static unsigned int crc32_for_byte(unsigned int r) {

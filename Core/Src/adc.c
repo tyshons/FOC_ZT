@@ -21,7 +21,7 @@
 #include "adc.h"
 
 /* USER CODE BEGIN 0 */
-
+#include "BISS_C.h"
 /* USER CODE END 0 */
 
 ADC_HandleTypeDef hadc1;
@@ -340,6 +340,7 @@ void calibrate_current_offset(void)
 
 void ad_sample_process(void)
 {
+    Biss_start_transfer();
     // 1. 读取原始值 (顺序对应 Rank 1~4)
     uint32_t u_raw = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_1);
     uint32_t v_raw = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_2);
@@ -370,7 +371,7 @@ void ad_sample_process(void)
     g_adc_current[2] -= mid_offset;
 
     // 6. 调用 FOC 控制循环
-    Control_Loop();
+    Control_Loop_test();
 
 }
 
