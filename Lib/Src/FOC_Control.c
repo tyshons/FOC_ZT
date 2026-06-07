@@ -4,12 +4,14 @@
 
 #include "tim.h"
 #include "FOC_Control.h"
-#include <math.h>
+//#include <math.h>
 #include "PID_Control.h"
 #include "encoder.h"
 #include "FOC_Math.h"
-#include "BISS_C.h"
+//#include "BISS_C.h"
+#include "ssi.h"
 #include <stdint.h>
+#include "pos_process.h"
 
 #define PI 3.14159265358979323846f
 
@@ -33,24 +35,22 @@ float u_alpha, u_beta;
 uint32_t ccrA, ccrB, ccrC;
 
 static uint32_t Get_Time_Us(void) {
-  return __HAL_TIM_GET_COUNTER(&htim1) / 25; // 假设 TIM1 为 10MHz，1tick=0.1us
+  return __HAL_TIM_GET_COUNTER(&htim1) / 25;
 }
 
 void Control_Loop(void) {
   static uint8_t cnt = 0;
   cnt++;
   uint32_t current_time = Get_Time_Us();
-  Biss_process(&current_angle_sp);
+  //Biss_process(&current_angle_sp);
+  ssi_process(&current_angle_sp);
   //current_angle_sp = encoder_data.angle;
-  Get_Electrical_Angle(&theta);
+  Get_Electrical_Angle(&theta,&current_angle_sp);
 
-  if (cnt==20) {
+  if (cnt==4) {
     cnt = 0;
-    //Encoder_Speed_Update();
-    Encoder_Speed_Update(&current_speed_sp);
-    //current_speed_sp = encoder_data.speed;
-    //float position_error = position_given_sp - current_angle_sp;
-    speed_given_sp = PID_Update(&position_pid_inst,(position_given_sp-current_angle_sp), current_time);
+    Encoder_Speed_Update(&current_speed_sp,&current_angle_sp);
+    //speed_given_sp = PID_Update(&position_pid_inst,(position_given_sp-current_angle_sp), current_time);
     iq_given_sp = PID_Update(&speed_pid_inst,(speed_given_sp - current_speed_sp), current_time);
   }
 
@@ -79,13 +79,8 @@ void Control_Loop_test(void) {
   // 如果没有精确 dt，可以直接用一个固定增量
   float dt = 0.00005f; // 假设 PWM 频率为 10kHz
 
-  Encoder_Position_Request(ENCODER_ID);
-  if (encoder_data.is_valid) {
-    current_angle_sp = encoder_data.angle;
-    //Encoder_Speed_Update();
-    current_speed_sp = encoder_data.speed;
-  }
-  Get_Electrical_Angle(&theta);
+  ssi_process(&current_angle_sp);
+  Get_Electrical_Angle(&theta,&current_angle_sp);
   // 2. 让电角度自增
   open_loop_theta += open_loop_speed * dt;
 

@@ -181,7 +181,7 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* adcHandle)
     HAL_GPIO_Init(ADC_VBUS_GPIO_Port, &GPIO_InitStruct);
 
     /* ADC1 interrupt Init */
-    HAL_NVIC_SetPriority(ADC1_2_IRQn, 1, 0);
+    HAL_NVIC_SetPriority(ADC1_2_IRQn, 0, 0);
     HAL_NVIC_EnableIRQ(ADC1_2_IRQn);
   /* USER CODE BEGIN ADC1_MspInit 1 */
 
@@ -315,7 +315,6 @@ void calibrate_current_offset(void)
     config.InjectedSamplingTime = ADC_SAMPLETIME_12CYCLES_5;
     config.InjectedSingleDiff = ADC_SINGLE_ENDED;
     config.InjectedNbrOfConversion = 4;
-    // 关键：改回定时器触发 (确保 CubeMX 中配置的 T1_TRGO 宏定义正确)
     config.ExternalTrigInjecConv = ADC_EXTERNALTRIGINJEC_T1_TRGO;
     config.ExternalTrigInjecConvEdge = ADC_EXTERNALTRIGINJECCONV_EDGE_RISING;
 
@@ -340,7 +339,7 @@ void calibrate_current_offset(void)
 
 void ad_sample_process(void)
 {
-    Biss_start_transfer();
+    //Biss_start_transfer();
     // 1. 读取原始值 (顺序对应 Rank 1~4)
     uint32_t u_raw = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_1);
     uint32_t v_raw = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_2);
@@ -371,7 +370,7 @@ void ad_sample_process(void)
     g_adc_current[2] -= mid_offset;
 
     // 6. 调用 FOC 控制循环
-    Control_Loop_test();
+    Control_Loop();
 
 }
 

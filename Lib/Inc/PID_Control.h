@@ -20,7 +20,7 @@ typedef struct {
   // 积分限幅（防饱和）
   float integral_limit;
 
-  // 微分滤波器（如果用 D 项）
+  // 微分滤波器
   float low_pass_filter_time_constant;
 
   // 内部状态
@@ -41,7 +41,7 @@ extern PID_TypeDef iq_pid_inst;
 
 // 初始化函数
 void Control_Loop_Init(void);
-void PID_Init(PID_TypeDef* pid, float kp, float ki, float kd);
+void PID_Init(PID_TypeDef* pid);
 void PID_SetOutputLimits(PID_TypeDef* pid, float min, float max);
 void PID_SetIntegralLimit(PID_TypeDef* pid, float limit);
 void PID_Reset(PID_TypeDef* pid);

@@ -5,48 +5,58 @@
 #include "PID_Control.h"
 #include "adc.h"
 
-PID_TypeDef position_pid_inst = {0};
-PID_TypeDef speed_pid_inst = {0};
-PID_TypeDef id_pid_inst = {0};
-PID_TypeDef iq_pid_inst = {0};
+PID_TypeDef position_pid_inst = {
+  .Kp = 0.25f,
+  .Ki = 0.0f,
+  .Kd = 0.0f,
+  .output_min = -800.0f,
+  .output_max = 800.0f,
+  .integral_limit = 100.0f,
+  .low_pass_filter_time_constant = 0.01f};
+PID_TypeDef speed_pid_inst = {
+  .Kp = 0.55f,
+  .Ki = 0.45f,
+  .Kd = 0.0f,
+  .output_min = -27.0f,
+  .output_max = 27.0f,
+  .integral_limit = 15.0f,
+  .low_pass_filter_time_constant = 0.005f};
+PID_TypeDef id_pid_inst = {
+  .Kp = 1.0f,
+  .Ki = 35.0f,
+  .Kd = 0.0f,
+  .output_min = -25.0f,
+  .output_max = 25.0f,
+  .integral_limit = 20.0f,
+  .low_pass_filter_time_constant = 0.001f};
+PID_TypeDef iq_pid_inst = {
+  .Kp = 1.0f,
+  .Ki = 35.0f,
+  .Kd = 0.0f,
+  .output_min = -25.0f,
+  .output_max = 25.0f,
+  .integral_limit = 20.0f,
+  .low_pass_filter_time_constant = 0.001f};
 
 void Control_Loop_Init(void) {
   // 初始化位置环 PID
-  PID_Init(&position_pid_inst, 5.0f, 5.0f, 0.0f);
-  PID_SetOutputLimits(&position_pid_inst, -1000.0f, 1000.0f); // 速度限幅
-  PID_SetIntegralLimit(&position_pid_inst, 100.0f);
-  position_pid_inst.low_pass_filter_time_constant = 0.01f; // 10ms 低通滤波
+  PID_Init(&position_pid_inst);
+  PID_Reset(&position_pid_inst);
 
   // 初始化速度环 PID
-  PID_Init(&speed_pid_inst, 0.007f, 0.01f, 0.0f);
-  PID_SetOutputLimits(&speed_pid_inst, -2.0f, 2.0f); // PWM 限幅
-  PID_SetIntegralLimit(&speed_pid_inst, 5.0f);
-  speed_pid_inst.low_pass_filter_time_constant = 0.005f; // 5ms 低通滤波
+  PID_Init(&speed_pid_inst);
+  PID_Reset(&speed_pid_inst);
 
   // 初始化电流环 PID
-  PID_Init(&id_pid_inst, 1.0f, 25.0f, 0.0f);
+  PID_Init(&id_pid_inst);
   PID_Reset(&id_pid_inst);
-  PID_SetOutputLimits(&id_pid_inst, -VOLTAGE_LIMIT, VOLTAGE_LIMIT);
-  PID_SetIntegralLimit(&id_pid_inst, 30);
-  iq_pid_inst.low_pass_filter_time_constant = 0.001f; // 1ms 低通滤波
 
-  PID_Init(&iq_pid_inst, 1.0f, 25.0f, 0.0f);
+  PID_Init(&iq_pid_inst);
   PID_Reset(&iq_pid_inst);
-  PID_SetOutputLimits(&iq_pid_inst, -VOLTAGE_LIMIT, VOLTAGE_LIMIT);
-  PID_SetIntegralLimit(&iq_pid_inst, 30);
-  iq_pid_inst.low_pass_filter_time_constant = 0.001f; // 1ms 低通滤波
 }
 
-void PID_Init(PID_TypeDef* pid, float kp, float ki, float kd)
+void PID_Init(PID_TypeDef* pid)
 {
-    pid->Kp = kp;
-    pid->Ki = ki;
-    pid->Kd = kd;
-
-    pid->output_min = -28.0f;
-    pid->output_max = 28.0f;
-    pid->integral_limit = 10.0f;
-
     pid->enabled = true;
     pid->anti_windup_enabled = true;
 
@@ -59,18 +69,6 @@ void PID_Reset(PID_TypeDef* pid)
     pid->derivative = 0.0f;
     pid->last_error = 0.0f;
     pid->last_update_time_us = 0;
-}
-
-void PID_SetOutputLimits(PID_TypeDef* pid, float min, float max)
-{
-    if (min >= max) return;
-    pid->output_min = min;
-    pid->output_max = max;
-}
-
-void PID_SetIntegralLimit(PID_TypeDef* pid, float limit)
-{
-    pid->integral_limit = limit;
 }
 
 // 标准位置式 PID
