@@ -34,6 +34,7 @@ float u_d = 0.0f, u_q = 0.0f;
 float u_alpha, u_beta;
 uint32_t ccrA, ccrB, ccrC;
 
+
 static uint32_t Get_Time_Us(void) {
   return __HAL_TIM_GET_COUNTER(&htim1) / 25;
 }
@@ -43,11 +44,11 @@ void Control_Loop(void) {
   cnt++;
   uint32_t current_time = Get_Time_Us();
   //Biss_process(&current_angle_sp);
-  ssi_process(&current_angle_sp);
+  ssi_process();
   //current_angle_sp = encoder_data.angle;
   Get_Electrical_Angle(&theta,&current_angle_sp);
 
-  if (cnt==4) {
+  if (cnt==5) {
     cnt = 0;
     Encoder_Speed_Update(&current_speed_sp,&current_angle_sp);
     //speed_given_sp = PID_Update(&position_pid_inst,(position_given_sp-current_angle_sp), current_time);
@@ -79,7 +80,7 @@ void Control_Loop_test(void) {
   // 如果没有精确 dt，可以直接用一个固定增量
   float dt = 0.00005f; // 假设 PWM 频率为 10kHz
 
-  ssi_process(&current_angle_sp);
+  ssi_process();
   Get_Electrical_Angle(&theta,&current_angle_sp);
   // 2. 让电角度自增
   open_loop_theta += open_loop_speed * dt;

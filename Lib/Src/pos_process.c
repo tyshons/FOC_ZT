@@ -15,32 +15,24 @@
 
 void Encoder_Speed_Update(float *speed_out,const float *current_angle_sp) {
   static float last_angle = 0.0f;
-  static uint32_t last_time = 0;
   static uint8_t is_initialized = 0;
   static float filtered_speed = 0.0f;
+  const float dt = 0.00025f;
 
   if (speed_out == NULL || current_angle_sp == NULL) {
     return;
   }
 
   float current_angle = * current_angle_sp ;
-  uint32_t current_time = HAL_GetTick();
 
   if (!is_initialized) {
     last_angle = current_angle;
-    last_time = current_time;
     filtered_speed = 0.0f;
     *speed_out = 0.0f;
     is_initialized = 1;
     return;
   }
   //uint32_t current_time = HAL_GetTick();
-  float dt = (float)(current_time - last_time) / 1000.0f;
-
-  if (dt <= 0.0f || dt > 1.0f) {
-    last_time = current_time;
-    return;
-  }
 
   float delta_angle = current_angle - last_angle;
 
@@ -54,7 +46,7 @@ void Encoder_Speed_Update(float *speed_out,const float *current_angle_sp) {
   *speed_out = filtered_speed;
 
   last_angle = current_angle;
-  last_time = current_time;
+
 }
 
 void Get_Electrical_Angle(float *theta_out,const float *current_angle_sp) {

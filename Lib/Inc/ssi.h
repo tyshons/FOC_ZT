@@ -6,6 +6,6 @@
 #define FOC_ZT_SSI_H
 
 
-void ssi_process(float* ssi_out);
+void ssi_process(void);
 
 #endif //FOC_ZT_SSI_H
