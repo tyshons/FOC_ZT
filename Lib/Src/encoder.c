@@ -7,6 +7,8 @@
 #include <string.h>
 
 #include "usart.h"
+#include "turntable_comm.h"
+#include "vofa.h"
 
 #define PI 3.14159265358979323846f
 #define POLE_PAIRS 20.0f      // 电机极对数
@@ -34,6 +36,10 @@ void Encoder_Init(void) {
 }
 
 void Encoder_Position_Request(uint8_t id) {
+
+  if (Vofa_IsEnabled()) {
+    return;
+  }
 
   if (rx_complete) {
     rx_complete = 0;
@@ -169,7 +175,18 @@ unsigned int calc_crc32_manual(const unsigned char *buf, unsigned int size) {
 }
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
+  if (huart->Instance == USART1) {
+    if (Turntable_Comm_IsEnabled()) {
+      Turntable_Comm_UartTxCpltCallback(huart);
+      return;
+    }
+  }
+
   if (huart->Instance == USART3) {
+    if (Vofa_IsEnabled()) {
+      Vofa_UartTxCpltCallback(huart);
+      return;
+    }
     dma_tx_done = 1;
     HAL_GPIO_WritePin(LED1_GPIO_Port, LED1_Pin, GPIO_PIN_RESET);
     dma_rx_busy = 1;
@@ -179,7 +196,18 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
 
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+  if (huart->Instance == USART1) {
+    if (Turntable_Comm_IsEnabled()) {
+      Turntable_Comm_UartRxCpltCallback(huart);
+      return;
+    }
+  }
+
   if (huart->Instance == USART3) {
+    if (Vofa_IsEnabled()) {
+      Vofa_UartRxCpltCallback(huart);
+      return;
+    }
     dma_rx_busy = 0;
     rx_complete = 1;
     success_count++;
@@ -188,3 +216,18 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
   }
 }
 
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart) {
+  if (huart->Instance == USART1) {
+    if (Turntable_Comm_IsEnabled()) {
+      Turntable_Comm_UartErrorCallback(huart);
+      return;
+    }
+  }
+
+  if (huart->Instance == USART3) {
+    if (Vofa_IsEnabled()) {
+      Vofa_UartErrorCallback(huart);
+      return;
+    }
+  }
+}
