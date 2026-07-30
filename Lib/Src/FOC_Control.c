@@ -43,15 +43,15 @@ void Control_Loop(void) {
   static uint8_t cnt = 0;
   cnt++;
   uint32_t current_time = Get_Time_Us();
-  //Biss_process(&current_angle_sp);
+  //Biss_process(&current_angle_sp);//bissc
+  //current_angle_sp = encoder_data.angle;//485
   ssi_process();
-  //current_angle_sp = encoder_data.angle;
   Get_Electrical_Angle(&theta,&current_angle_sp);
 
   if (cnt==5) {
     cnt = 0;
     Encoder_Speed_Update(&current_speed_sp,&current_angle_sp);
-    //speed_given_sp = PID_Update(&position_pid_inst,(position_given_sp-current_angle_sp), current_time);
+    speed_given_sp = PID_Update(&position_pid_inst,(position_given_sp-current_angle_sp), current_time);
     iq_given_sp = PID_Update(&speed_pid_inst,(speed_given_sp - current_speed_sp), current_time);
   }
 

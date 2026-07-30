@@ -55,7 +55,7 @@ void Get_Electrical_Angle(float *theta_out,const float *current_angle_sp) {
 
   float theta_mech = ((*current_angle_sp - angle_offset) / 180.0f) * PI;
 
-  float theta_elec = theta_mech * 20.0f;
+  float theta_elec = theta_mech * 22.0f;
 
   theta_elec = fmodf(theta_elec, 2.0f * PI);
   if (theta_elec < 0) {
