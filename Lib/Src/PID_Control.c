@@ -72,6 +72,33 @@ void PID_Reset(PID_TypeDef* pid)
 }
 
 // 标准位置式 PID
+void PID_SetOutputLimits(PID_TypeDef* pid, float min, float max)
+{
+    if (min > max) {
+        float tmp = min;
+        min = max;
+        max = tmp;
+    }
+
+    pid->output_min = min;
+    pid->output_max = max;
+}
+
+void PID_SetIntegralLimit(PID_TypeDef* pid, float limit)
+{
+    if (limit < 0.0f) {
+        limit = -limit;
+    }
+
+    pid->integral_limit = limit;
+
+    if (pid->integral > pid->integral_limit) {
+        pid->integral = pid->integral_limit;
+    } else if (pid->integral < -pid->integral_limit) {
+        pid->integral = -pid->integral_limit;
+    }
+}
+
 float PID_Update(PID_TypeDef* pid, float error, uint32_t current_time_us)
 {
     if (!pid->enabled) return 0.0f;

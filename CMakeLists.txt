@@ -43,6 +43,10 @@ add_executable(${CMAKE_PROJECT_NAME}
         Lib/Inc/ssi.h
         Lib/Src/pos_process.c
         Lib/Inc/pos_process.h
+        Lib/Src/vofa.c
+        Lib/Inc/vofa.h
+        Lib/Src/turntable_comm.c
+        Lib/Inc/turntable_comm.h
 )
 
 # Add STM32CubeMX generated sources

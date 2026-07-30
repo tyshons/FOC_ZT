@@ -32,6 +32,8 @@
 #include "encoder.h"
 #include "PID_Control.h"
 #include "BISS_C.h"
+#include "vofa.h"
+#include "turntable_comm.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -98,6 +100,7 @@ int main(void)
   MX_DMA_Init();
   MX_TIM1_Init();
   MX_ADC1_Init();
+  MX_USART1_UART_Init();
   MX_USART3_UART_Init();
   MX_SPI1_Init();
   MX_USART1_UART_Init();
@@ -106,6 +109,8 @@ int main(void)
   adc_foc_init();
   Motor_Enable();
   Encoder_Init();
+  Vofa_Init();
+  Turntable_Comm_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -115,6 +120,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    Vofa_Task();
+    Turntable_Comm_Task();
 
     // static uint32_t last_request = 0;
     // if (HAL_GetTick() - last_request >= 1) {

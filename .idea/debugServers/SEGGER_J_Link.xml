@@ -4,7 +4,7 @@
       <debugger kind="GDB" isBundled="true" />
       <env />
     </debugger>
-    <gdbserver exe="D:/AAA-software/J-Llink/JLink_V914a/JLinkGDBServerCL.exe" />
+    <gdbserver exe="$PROJECT_DIR$/../Program Files/SEGGER/JLink_V962/JLinkGDBServerCL.exe" />
     <console enabled="false" port="2334" />
     <target device="STM32G474VE" reset-before="false" />
     <connection extended-remote="false" port="4444" warmup-ms="500" />
