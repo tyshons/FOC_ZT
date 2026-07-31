@@ -30,6 +30,9 @@
 
 #define TT_EXT_PID_QUERY  0x10U
 #define TT_EXT_PID_REPORT 0x11U
+#define TT_EXT_TELEMETRY_REPORT 0x12U
+#define TT_EXT_TARGET_QUERY  0x13U
+#define TT_EXT_TARGET_REPORT 0x14U
 
 #define TT_AXIS_AZ      0x00U
 #define TT_AXIS_EL      0x01U
@@ -38,8 +41,13 @@
 #define TT_UART_INSTANCE USART1
 
 extern float current_angle_sp;
+/* Read-only FOC runtime measurements.  The control/driver layer is unchanged. */
+extern float current_speed_sp;
 extern float position_given_sp;
-extern float speed_given_sp;
+extern float i_d;
+extern float i_q;
+
+static void send_telemetry_frame(void);
 
 typedef enum {
   TT_RX_WAIT_HEAD0 = 0,
@@ -146,7 +154,7 @@ static PID_TypeDef *pid_from_loop(uint8_t loop)
 static void apply_axis_angle(uint8_t axis, float target_deg)
 {
   if (axis == TT_AXIS_AZ) {
-    position_given_sp = target_deg;
+    FOC_SetPositionTarget(target_deg);
   } else if (axis == TT_AXIS_EL) {
     tt_el_target_deg = target_deg;
     tt_el_actual_deg = target_deg;
@@ -216,7 +224,7 @@ static void handle_servo_frame(const uint8_t *frame, uint8_t len)
     }
   } else if (func == TT_FUNC_SPEED) {
     if (len == 12U && frame[4] == TT_AXIS_AZ) {
-      speed_given_sp = read_le_float(&frame[5]);
+      FOC_SetSpeedTarget(read_le_float(&frame[5]));
     }
   } else if ((func >= 0x03U && func <= 0x05U) && len == 8U) {
     apply_feature(&tt_servo_features, func, frame[4]);
@@ -286,8 +294,40 @@ static void send_pid_report(uint8_t pid_mode, uint8_t axis, uint8_t loop)
   tt_tx_busy = 0U;
 }
 
+/* Extension target report (16 bytes):
+ * A5 5A 05 14 valid az_target el_target checksum 0D 0A */
+static void send_target_report(void)
+{
+  if (tt_tx_busy) {
+    return;
+  }
+
+  tt_tx_buf[0] = TT_HEAD0;
+  tt_tx_buf[1] = TT_HEAD1;
+  tt_tx_buf[2] = TT_MODE_EXT;
+  tt_tx_buf[3] = TT_EXT_TARGET_REPORT;
+  tt_tx_buf[4] = FOC_IsPositionTargetValid();
+  write_le_float(&tt_tx_buf[5], position_given_sp);
+  write_le_float(&tt_tx_buf[9], tt_el_target_deg);
+  tt_tx_buf[13] = checksum_sum(tt_tx_buf, 2U, 13U);
+  tt_tx_buf[14] = TT_TAIL0;
+  tt_tx_buf[15] = TT_TAIL1;
+
+  tt_tx_busy = 1U;
+  if (HAL_UART_Transmit(&TT_UART_HANDLE, tt_tx_buf, 16U, 5U) != HAL_OK) {
+    tt_status_tx_error_count++;
+    Turntable_Comm_UartErrorCallback(&TT_UART_HANDLE);
+  }
+  tt_tx_busy = 0U;
+}
+
 static void handle_ext_frame(const uint8_t *frame, uint8_t len)
 {
+  if (len == 7U && frame[3] == TT_EXT_TARGET_QUERY) {
+    send_target_report();
+    return;
+  }
+
   if (len != 10U || frame[3] != TT_EXT_PID_QUERY) {
     return;
   }
@@ -330,6 +370,8 @@ static void handle_frame(const uint8_t *frame, uint8_t len)
 
 static void send_status_frame(void)
 {
+  HAL_StatusTypeDef tx_status;
+
   if (!Turntable_Comm_IsEnabled() || tt_tx_busy) {
     return;
   }
@@ -342,11 +384,53 @@ static void send_status_frame(void)
   tt_tx_buf[11] = TT_TAIL1;
 
   tt_tx_busy = 1U;
-  if (HAL_UART_Transmit(&TT_UART_HANDLE, tt_tx_buf, 12U, 2U) != HAL_OK) {
+  tx_status = HAL_UART_Transmit(&TT_UART_HANDLE, tt_tx_buf, 12U, 2U);
+  if (tx_status != HAL_OK) {
     tt_status_tx_error_count++;
     Turntable_Comm_UartErrorCallback(&TT_UART_HANDLE);
   } else {
     tt_status_tx_count++;
+  }
+  tt_tx_busy = 0U;
+
+  /* Send the optional telemetry only after the legacy position frame. */
+  if (tx_status == HAL_OK) {
+    send_telemetry_frame();
+  }
+}
+
+/*
+ * Extension telemetry frame (24 bytes):
+ *   A5 5A 05 12 az_speed el_speed iq id power_state checksum 0D 0A
+ *
+ * The original 12-byte position status frame is deliberately retained above
+ * for compatibility with existing host software.  current_speed_sp is in RPM;
+ * the host chart uses degrees/second, hence the factor of six. power_state is
+ * 0 = disabled, 1 = waiting for fresh encoder samples, 2 = enabled.
+ */
+static void send_telemetry_frame(void)
+{
+  if (!Turntable_Comm_IsEnabled() || tt_tx_busy) {
+    return;
+  }
+
+  tt_tx_buf[0] = TT_HEAD0;
+  tt_tx_buf[1] = TT_HEAD1;
+  tt_tx_buf[2] = TT_MODE_EXT;
+  tt_tx_buf[3] = TT_EXT_TELEMETRY_REPORT;
+  write_le_float(&tt_tx_buf[4], current_speed_sp * 6.0f);
+  write_le_float(&tt_tx_buf[8], 0.0f);   /* No physical elevation speed channel. */
+  write_le_float(&tt_tx_buf[12], i_q);   /* Torque-producing current, A. */
+  write_le_float(&tt_tx_buf[16], i_d);   /* Flux current, A. */
+  tt_tx_buf[20] = FOC_GetPowerState();
+  tt_tx_buf[21] = checksum_sum(tt_tx_buf, 2U, 21U);
+  tt_tx_buf[22] = TT_TAIL0;
+  tt_tx_buf[23] = TT_TAIL1;
+
+  tt_tx_busy = 1U;
+  if (HAL_UART_Transmit(&TT_UART_HANDLE, tt_tx_buf, 24U, 5U) != HAL_OK) {
+    tt_status_tx_error_count++;
+    Turntable_Comm_UartErrorCallback(&TT_UART_HANDLE);
   }
   tt_tx_busy = 0U;
 }

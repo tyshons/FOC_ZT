@@ -12,11 +12,18 @@
 #define PI 3.14159265358979323846f
 #define SPEED_FILTER_ALPHA 0.1f
 
+static float last_angle = 0.0f;
+static uint8_t is_initialized = 0U;
+static float filtered_speed = 0.0f;
+
+void Encoder_Speed_Reset(float current_angle_deg)
+{
+  last_angle = current_angle_deg;
+  filtered_speed = 0.0f;
+  is_initialized = 1U;
+}
 
 void Encoder_Speed_Update(float *speed_out,const float *current_angle_sp) {
-  static float last_angle = 0.0f;
-  static uint8_t is_initialized = 0;
-  static float filtered_speed = 0.0f;
   const float dt = 0.00025f;
 
   if (speed_out == NULL || current_angle_sp == NULL) {
@@ -55,7 +62,7 @@ void Get_Electrical_Angle(float *theta_out,const float *current_angle_sp) {
 
   float theta_mech = ((*current_angle_sp - angle_offset) / 180.0f) * PI;
 
-  float theta_elec = theta_mech * 22.0f;
+  float theta_elec = theta_mech * 20.0f;
 
   theta_elec = fmodf(theta_elec, 2.0f * PI);
   if (theta_elec < 0) {

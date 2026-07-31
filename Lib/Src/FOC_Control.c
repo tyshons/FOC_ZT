@@ -10,6 +10,7 @@
 #include "FOC_Math.h"
 //#include "BISS_C.h"
 #include "ssi.h"
+#include <math.h>
 #include <stdint.h>
 #include "pos_process.h"
 
@@ -34,6 +35,103 @@ float u_d = 0.0f, u_q = 0.0f;
 float u_alpha, u_beta;
 uint32_t ccrA, ccrB, ccrC;
 
+static volatile FOC_ControlMode foc_control_mode = FOC_CONTROL_MODE_POSITION;
+
+typedef enum {
+  FOC_POWER_DISABLED = 0,
+  FOC_POWER_WAIT_ENCODER,
+  FOC_POWER_ENABLED
+} FOC_PowerState;
+
+#define FOC_ENABLE_MIN_FRESH_SAMPLES 2U
+
+static volatile FOC_PowerState foc_power_state = FOC_POWER_DISABLED;
+static volatile uint8_t foc_position_target_valid = 0U;
+static uint32_t enable_sample_count = 0U;
+
+static float shortest_angle_error_deg(float target_deg, float actual_deg)
+{
+  float error = fmodf(target_deg - actual_deg + 180.0f, 360.0f);
+  if (error < 0.0f) {
+    error += 360.0f;
+  }
+  return error - 180.0f;
+}
+
+static void restore_interrupt_state(uint32_t primask)
+{
+  if ((primask & 1U) == 0U) {
+    __enable_irq();
+  }
+}
+
+static void reset_control_state(void)
+{
+  PID_Reset(&position_pid_inst);
+  PID_Reset(&speed_pid_inst);
+  PID_Reset(&id_pid_inst);
+  PID_Reset(&iq_pid_inst);
+  speed_given_sp = 0.0f;
+  id_given_sp = 0.0f;
+  iq_given_sp = 0.0f;
+  u_d = 0.0f;
+  u_q = 0.0f;
+  foc_control_mode = FOC_CONTROL_MODE_POSITION;
+}
+
+static void set_pwm_neutral(void)
+{
+  uint32_t neutral_compare = htim1.Init.Period / 2U;
+  ccrA = neutral_compare;
+  ccrB = neutral_compare;
+  ccrC = neutral_compare;
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, neutral_compare);
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, neutral_compare);
+  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, neutral_compare);
+}
+
+void FOC_SetPositionTarget(float target_deg)
+{
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+
+  if (foc_control_mode != FOC_CONTROL_MODE_POSITION) {
+    PID_Reset(&position_pid_inst);
+    PID_Reset(&speed_pid_inst);
+  }
+  position_given_sp = target_deg;
+  foc_control_mode = FOC_CONTROL_MODE_POSITION;
+  foc_position_target_valid = 1U;
+
+  restore_interrupt_state(primask);
+}
+
+void FOC_SetSpeedTarget(float target_rpm)
+{
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+
+  if (foc_control_mode != FOC_CONTROL_MODE_SPEED) {
+    PID_Reset(&speed_pid_inst);
+  }
+  speed_given_sp = target_rpm;
+  foc_control_mode = FOC_CONTROL_MODE_SPEED;
+  foc_position_target_valid = 0U;
+
+  restore_interrupt_state(primask);
+}
+
+FOC_ControlMode FOC_GetControlMode(void)
+{
+  return foc_control_mode;
+}
+
+uint8_t FOC_IsPositionTargetValid(void)
+{
+  return (foc_position_target_valid &&
+          foc_control_mode == FOC_CONTROL_MODE_POSITION) ? 1U : 0U;
+}
+
 
 static uint32_t Get_Time_Us(void) {
   return __HAL_TIM_GET_COUNTER(&htim1) / 25;
@@ -41,17 +139,40 @@ static uint32_t Get_Time_Us(void) {
 
 void Control_Loop(void) {
   static uint8_t cnt = 0;
-  cnt++;
   uint32_t current_time = Get_Time_Us();
   //Biss_process(&current_angle_sp);//bissc
   //current_angle_sp = encoder_data.angle;//485
   ssi_process();
   Get_Electrical_Angle(&theta,&current_angle_sp);
 
+  if (foc_power_state == FOC_POWER_WAIT_ENCODER) {
+    if ((uint32_t)(SSI_GetValidSampleCount() - enable_sample_count) >=
+        FOC_ENABLE_MIN_FRESH_SAMPLES) {
+      position_given_sp = current_angle_sp;
+      current_speed_sp = 0.0f;
+      Encoder_Speed_Reset(current_angle_sp);
+      reset_control_state();
+      set_pwm_neutral();
+      foc_position_target_valid = 1U;
+      foc_power_state = FOC_POWER_ENABLED;
+      HAL_GPIO_WritePin(SHUTDOWN_GPIO_Port, SHUTDOWN_Pin, GPIO_PIN_SET);
+    }
+    return;
+  }
+
+  if (foc_power_state != FOC_POWER_ENABLED) {
+    return;
+  }
+
+  cnt++;
+
   if (cnt==5) {
     cnt = 0;
     Encoder_Speed_Update(&current_speed_sp,&current_angle_sp);
-    speed_given_sp = PID_Update(&position_pid_inst,(position_given_sp-current_angle_sp), current_time);
+    if (foc_control_mode == FOC_CONTROL_MODE_POSITION) {
+      float position_error = shortest_angle_error_deg(position_given_sp, current_angle_sp);
+      speed_given_sp = PID_Update(&position_pid_inst, position_error, current_time);
+    }
     iq_given_sp = PID_Update(&speed_pid_inst,(speed_given_sp - current_speed_sp), current_time);
   }
 
@@ -115,18 +236,45 @@ void Control_Loop_test(void) {
 }
 
 void Motor_Enable(void) {
-  HAL_GPIO_WritePin(SHUTDOWN_GPIO_Port, SHUTDOWN_Pin, GPIO_PIN_SET);
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
 
+  if (foc_power_state == FOC_POWER_ENABLED ||
+      foc_power_state == FOC_POWER_WAIT_ENCODER) {
+    restore_interrupt_state(primask);
+    return;
+  }
+
+  /* Start timing and encoder sampling first while the power stage stays off. */
+  HAL_GPIO_WritePin(SHUTDOWN_GPIO_Port, SHUTDOWN_Pin, GPIO_PIN_RESET);
+  reset_control_state();
+  set_pwm_neutral();
+  foc_position_target_valid = 0U;
+  SSI_RearmValidation();
+  enable_sample_count = SSI_GetValidSampleCount();
+  foc_power_state = FOC_POWER_WAIT_ENCODER;
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
   HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
   HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
   HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_3);
+
+  restore_interrupt_state(primask);
 }
 
 void Motor_Disable(void) {
+  uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+
   HAL_GPIO_WritePin(SHUTDOWN_GPIO_Port, SHUTDOWN_Pin, GPIO_PIN_RESET);
+  foc_power_state = FOC_POWER_DISABLED;
+  reset_control_state();
+  current_speed_sp = 0.0f;
+  position_given_sp = current_angle_sp;
+  foc_position_target_valid = (SSI_GetValidSampleCount() > 0U) ? 1U : 0U;
+  Encoder_Speed_Reset(current_angle_sp);
+  set_pwm_neutral();
 
   HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
   HAL_TIMEx_PWMN_Stop(&htim1, TIM_CHANNEL_1);
@@ -134,4 +282,11 @@ void Motor_Disable(void) {
   HAL_TIMEx_PWMN_Stop(&htim1, TIM_CHANNEL_2);
   HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_3);
   HAL_TIMEx_PWMN_Stop(&htim1, TIM_CHANNEL_3);
+
+  restore_interrupt_state(primask);
+}
+
+uint8_t FOC_GetPowerState(void)
+{
+  return (uint8_t)foc_power_state;
 }
