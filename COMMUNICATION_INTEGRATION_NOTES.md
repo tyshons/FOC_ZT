@@ -62,7 +62,7 @@ Lib/Src/turntable_comm.c
 Lib/Inc/turntable_comm.h
 ```
 
-同时保留了之前新增的 VOFA 文件，但 VOFA 已禁用，不再占用串口。
+旧 VOFA、UART 编码器和 BISS-C 文件已经移除，控制角度统一来自 SSI。
 
 ### 2.3 接入主程序
 
@@ -92,12 +92,10 @@ Turntable_Comm_Task();
 
 修改文件：
 
-- `Lib/Src/encoder.c`
+- `Lib/Src/turntable_comm.c`
 
-正式上位机协议现在使用 USART1，USART3 保留给原 UART 编码器/备用逻辑：
-
-1. 如果回调来自 USART1 且 `Turntable_Comm_IsEnabled()` 为真，交给 `turntable_comm`。
-2. 如果回调来自 USART3，仍按 VOFA/原 UART 编码器逻辑分发。
+正式上位机协议只使用 USART1，三个 HAL UART 回调均直接转交给
+`turntable_comm`；USART3 不再初始化。
 
 涉及回调：
 
@@ -105,21 +103,9 @@ Turntable_Comm_Task();
 - `HAL_UART_RxCpltCallback`
 - `HAL_UART_ErrorCallback`
 
-`Encoder_Position_Request()` 仍使用 USART3，不再因为 USART1 正式协议启用而被拦截。
+### 2.5 移除旧 VOFA 通道
 
-### 2.5 禁用 VOFA
-
-修改文件：
-
-- `Lib/Inc/vofa.h`
-
-改为：
-
-```c
-#define VOFA_ENABLE 0
-```
-
-原因：当前任务目标是与上位机按正式协议通信，VOFA 的文本/CSV 调参协议暂时不参与，避免串口协议混用。
+VOFA 文本/CSV 调参协议和对应源文件已经移除，避免与正式二进制协议混用。
 
 ## 3. 上位机改动
 
@@ -358,18 +344,14 @@ A5 5A payload checksum 0D 0A
 
 上位机能发送“方位轴/俯仰轴”的 PID，但下位机当前只有一套 PID，因此无论 axis 是多少，都会改同一套 PID。
 
-### 6.5 扫频还没有真正控制输出
+### 6.5 旧扫频协议已移除
 
-当前只是把扫频参数保存到了 `tt_sweep_state`，还没有：
+原来只保存参数、没有驱动控制输出的 `TT_MODE_SWEEP` 路径已经删除。
+当前主动扫阶只通过实验扩展协议和 `Experiment_FixedFF_Sweep` 实现。
 
-- 生成正弦目标
-- 切换扫频控制模式
-- 按频率步进
-- 回传扫频曲线数据
+### 6.6 VOFA 已移除
 
-### 6.6 VOFA 已禁用
-
-之前的 VOFA 在线 PID 调参模块仍在代码里，但 `VOFA_ENABLE=0`。正式上位机协议现在走 USART1；如果后续还想同时保留 VOFA，需要明确给 VOFA 分配独立串口或做协议复用。
+正式上位机协议使用 USART1；VOFA 与原 UART 编码器通道均不再参与当前工程。
 
 ## 7. 已验证内容
 
@@ -435,3 +417,45 @@ python -m py_compile turntable_control.py
 - 左右水平轴调整改为基于面板内部保存的目标角度连续累加，不再每次都拿回传实际角度作为基准，避免实际角度刷新慢时连续点击无变化。
 - 水平轴角度按 `0~360°` 循环处理。
 - `归位` 按钮现在只发送水平/方位轴单轴角度设置帧，目标角度为 `245°`，不再同时把俯仰轴设置为 `0°`。
+
+## 11. 2026-08-01 ADC双端点采样诊断
+
+- TIM1在中心对齐PWM的两个端点分别触发一组完整ADC注入序列，序列频率为40 kHz。
+- ADC层将相邻两组U/V/W/VBUS数据平均后，只执行一次20 kHz FOC控制。
+- 电流零点使用4096组样本做浮点平均，避免整数截断造成亚计数偏差。
+- 当前Q轴参考电流限制为±2.0 A；该限制同时参与速度PID外层抗积分饱和。
+
+新增只查询不周期发送的ADC诊断帧：
+
+```text
+查询：A5 5A 05 19 1E 0D 0A
+回报：A5 5A 05 19 flags offset_u offset_v offset_w
+      endpoint_delta_u endpoint_delta_v endpoint_delta_w
+      adc_sequence_count foc_update_count checksum 0D 0A
+```
+
+回报帧共40字节，浮点数与32位计数均为小端格式。`flags`位0表示零点校准有效，位1表示当前已收到第一端点、正在等待第二端点。
+
+## 12. 2026-08-01 机械堵转诊断与限幅跟踪
+
+机械卡滞时，速度PID原始输出可能继续增加，而实验层总Iq已被限制为
+±2.0 A。现已将总Iq未能执行的部分折算回速度PID积分状态，避免卡滞
+解除后携带隐藏积分突然加速。
+
+堵转判定条件为：存在至少0.2 RPM的运动目标、实际速度不高于0.2 RPM、
+总Iq目标达到限幅的95%，并持续500 ms。堵转只作为诊断状态上报，
+不会自动断能，也不会突破总Iq限制；实际速度达到0.3 RPM后解除状态。
+
+新增只查询不周期发送的堵转诊断帧：
+
+```text
+查询：A5 5A 05 1A 1F 0D 0A
+回报：A5 5A 05 1A flags
+      speed_target speed_actual iq_pid_raw iq_target iq_measured
+      last_stall_angle stall_duration_ms stall_event_count
+      checksum 0D 0A
+```
+
+回报共40字节。`flags`位0表示当前已确认堵转，位1表示总Iq限幅正在
+修正速度PID积分。六个浮点数单位依次为RPM、RPM、A、A、A、度，
+最后两个字段为小端32位无符号整数。

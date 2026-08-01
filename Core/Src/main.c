@@ -29,11 +29,9 @@
 /* USER CODE BEGIN Includes */
 #include "FOC_Math.h"
 #include "FOC_Control.h"
-#include "encoder.h"
 #include "PID_Control.h"
-#include "BISS_C.h"
-#include "vofa.h"
 #include "turntable_comm.h"
+#include "Experiment_Control.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -100,17 +98,14 @@ int main(void)
   MX_DMA_Init();
   MX_TIM1_Init();
   MX_ADC1_Init();
-  MX_USART3_UART_Init();
   MX_SPI1_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   Control_Loop_Init();
+  Experiment_Control_Init();
   adc_foc_init();
-  /* Keep the power stage disabled at boot.  The host must explicitly send
-   * the "enable azimuth" command before PWM and the driver are enabled. */
+  /* 上电时保持功率级关闭，必须由上位机显式发送方位轴使能命令。 */
   Motor_Disable();
-  Encoder_Init();
-  Vofa_Init();
   Turntable_Comm_Init();
   /* USER CODE END 2 */
 
@@ -121,15 +116,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    Vofa_Task();
+    Experiment_Control_Background();
     Turntable_Comm_Task();
-
-    // static uint32_t last_request = 0;
-    // if (HAL_GetTick() - last_request >= 1) {
-    //   last_request = HAL_GetTick();
-    //
-    //   Encoder_Position_Request(ENCODER_ID);
-    // }
 
   }
   /* USER CODE END 3 */

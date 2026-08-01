@@ -8,11 +8,16 @@
 
 extern volatile uint32_t tt_status_tx_count;
 extern volatile uint32_t tt_status_tx_error_count;
+extern volatile uint32_t tt_rx_dropped_frame_count;
+extern volatile uint32_t tt_rx_uart_error_count;
+extern volatile uint32_t tt_rx_valid_frame_count;
+extern volatile uint32_t tt_rx_invalid_frame_count;
 
 void Turntable_Comm_Init(void);
 void Turntable_Comm_Task(void);
 uint8_t Turntable_Comm_IsEnabled(void);
 void Turntable_Comm_UartRxCpltCallback(UART_HandleTypeDef *huart);
+void Turntable_Comm_UartRxEventCallback(UART_HandleTypeDef *huart, uint16_t size);
 void Turntable_Comm_UartTxCpltCallback(UART_HandleTypeDef *huart);
 void Turntable_Comm_UartErrorCallback(UART_HandleTypeDef *huart);
 

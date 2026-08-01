@@ -1,84 +1,86 @@
 cmake_minimum_required(VERSION 3.22)
 
 #
-# This file is generated only once,
-# and is not re-generated if converter is called multiple times.
+# 本文件只生成一次，
+# 后续多次调用转换器时不会重新生成。
 #
-# User is free to modify the file as much as necessary
+# 用户可按项目需要修改本文件。
 #
 
-# Setup compiler settings
+# 设置编译器。
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
 
 
-# Define the build type
+# 定义构建类型。
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE "Debug")
 endif()
 
-# Set the project name
+# 设置项目名称。
 set(CMAKE_PROJECT_NAME FOC_ZT)
 
-# Enable compile command to ease indexing with e.g. clangd
+# 导出编译命令，便于clangd等工具建立索引。
 set(CMAKE_EXPORT_COMPILE_COMMANDS TRUE)
 
-# Core project settings
+# 项目核心设置。
 project(${CMAKE_PROJECT_NAME})
 message("Build type: " ${CMAKE_BUILD_TYPE})
 
-# Enable CMake support for ASM and C languages
+# 启用汇编和C语言支持。
 enable_language(C ASM)
 
-# Create an executable object type
+# 创建可执行目标。
 add_executable(${CMAKE_PROJECT_NAME}
-        Lib/Src/encoder.c
         Lib/Src/FOC_Math.c
         Lib/Src/FOC_Control.c
         Lib/Src/PID_Control.c
-        Lib/Src/BISS_C.c
-        Lib/Inc/BISS_C.h
         Lib/Src/ssi.c
         Lib/Inc/ssi.h
         Lib/Src/pos_process.c
         Lib/Inc/pos_process.h
-        Lib/Src/vofa.c
-        Lib/Inc/vofa.h
         Lib/Src/turntable_comm.c
         Lib/Inc/turntable_comm.h
+        Experiments/Src/Experiment_Control.c
+        Experiments/Src/Experiment_Baseline.c
+        Experiments/Src/Experiment_ESO.c
+        Experiments/Src/Experiment_FixedFeedforward.c
+        Experiments/Src/Experiment_FixedFF_Sweep.c
+        Experiments/Src/Experiment_LearningFeedforward.c
 )
 
-# Add STM32CubeMX generated sources
+# 添加STM32CubeMX生成的源码。
 add_subdirectory(cmake/stm32cubemx)
 
-# Link directories setup
+# 设置链接目录。
 target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined library search paths
+    # 在此添加用户库搜索路径。
 )
 
-# Add sources to executable
+# 向可执行目标添加源码。
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user sources here
+    # 在此添加用户源码。
 )
 
-# Add include paths
+# 添加头文件搜索路径。
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined include paths
+    # 在此添加用户头文件路径。
         Lib/Inc
+        Experiments/Inc
 )
 
-# Add project symbols (macros)
+# 添加项目宏定义。
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined symbols
+    # 在此添加用户宏定义。
 )
 
-# Remove wrong libob.a library dependency when using cpp files
+# 使用C++文件时移除错误的libob.a依赖。
 list(REMOVE_ITEM CMAKE_C_IMPLICIT_LINK_LIBRARIES ob)
 
-# Add linked libraries
+# 添加链接库。
 target_link_libraries(${CMAKE_PROJECT_NAME}
     stm32cubemx
 
-    # Add user defined libraries
+    # 在此添加用户库。
 )

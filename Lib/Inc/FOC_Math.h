@@ -1,5 +1,5 @@
 //
-// Created by tyshon on 2025/12/6.
+// 创建于 2025/12/6。
 //
 
 #ifndef FOC_FOC_MATH_H
@@ -38,4 +38,4 @@ void park_transform(float i_alpha, float i_beta, float theta, float* i_d, float*
 void ipark_transform(float u_d, float u_q, float theta, float* u_alpha, float* u_beta);
 void svpwm_generate(float u_alpha, float u_beta, float u_dc, uint32_t* CCRA, uint32_t* CCRB, uint32_t* CCRC);
 
-#endif //FOC_FOC_MATH_H
+#endif

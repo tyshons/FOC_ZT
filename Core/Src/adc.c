@@ -21,7 +21,8 @@
 #include "adc.h"
 
 /* USER CODE BEGIN 0 */
-#include "BISS_C.h"
+#include "FOC_Control.h"
+#include "Experiment_Config.h"
 /* USER CODE END 0 */
 
 ADC_HandleTypeDef hadc1;
@@ -50,7 +51,11 @@ void MX_ADC1_Init(void)
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
   hadc1.Init.GainCompensation = 0;
   hadc1.Init.ScanConvMode = ADC_SCAN_ENABLE;
-  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  /*
+   * U/V/W 相电流和母线电压组成一个注入转换序列。
+   * 四个序列全部完成后只触发一次 FOC 回调，避免每个序列分别回调。
+   */
+  hadc1.Init.EOCSelection = ADC_EOC_SEQ_CONV;
   hadc1.Init.LowPowerAutoWait = DISABLE;
   hadc1.Init.ContinuousConvMode = DISABLE;
   hadc1.Init.NbrOfConversion = 1;
@@ -223,11 +228,42 @@ void HAL_ADC_MspDeInit(ADC_HandleTypeDef* adcHandle)
 float g_adc_current[3] = {0};
 float g_adc_vbus = 0;
 float g_adc_temp = 0;
-int16_t g_adc_offset[3] = {0};
+float g_adc_offset[3] = {0};
+volatile uint8_t g_adc_calibrated = 0U;
+
+volatile uint16_t g_adc_last_raw[4] = {0U};
+volatile float g_adc_endpoint_delta_current[3] = {0.0f};
+volatile uint32_t g_adc_sequence_count = 0U;
+volatile uint32_t g_adc_control_update_count = 0U;
+volatile uint8_t g_adc_pair_pending = 0U;
+
+static uint16_t
+    adc_endpoint_raw[FOC_ADC_SEQUENCES_PER_CONTROL][4] = {{0U}};
+static float adc_current_filtered_counts[3] = {0.0f};
+static uint8_t adc_pair_index = 0U;
 
 int8_t adc_start_err = 0;
 int8_t adc_timeout_err = 0;
 int8_t adc_restor_fail = 0;
+
+void ADC_ResetCurrentProcessing(void)
+{
+    adc_pair_index = 0U;
+    g_adc_pair_pending = 0U;
+    for (uint32_t phase = 0U; phase < 3U; phase++)
+    {
+        adc_current_filtered_counts[phase] = 0.0f;
+        g_adc_current[phase] = 0.0f;
+        g_adc_endpoint_delta_current[phase] = 0.0f;
+        g_adc_last_raw[phase] = 0U;
+        adc_endpoint_raw[0][phase] = 0U;
+        adc_endpoint_raw[1][phase] = 0U;
+    }
+    adc_endpoint_raw[0][3] = 0U;
+    adc_endpoint_raw[1][3] = 0U;
+    g_adc_last_raw[3] = 0U;
+    g_adc_vbus = 0.0f;
+}
 
 static int safe_injected_start(ADC_HandleTypeDef *hadc)
 {
@@ -254,8 +290,8 @@ void calibrate_current_offset(void)
 {
     ADC_InjectionConfTypeDef config = {0};
 
-    // 1. 禁用 JEOC 中断，防止校准过程中进入中断
-    __HAL_ADC_DISABLE_IT(&hadc1, ADC_IT_JEOC);
+    // 1. 禁用注入组中断，防止校准过程中进入控制中断
+    __HAL_ADC_DISABLE_IT(&hadc1, ADC_IT_JEOC | ADC_IT_JEOS);
 
     // 2. 强制停止当前的注入转换（如果是硬件触发状态）
     HAL_ADCEx_InjectedStop(&hadc1);
@@ -283,10 +319,14 @@ void calibrate_current_offset(void)
     config.InjectedChannel = ADC_CHANNEL_4; config.InjectedRank = ADC_INJECTED_RANK_4;
     HAL_ADCEx_InjectedConfigChannel(&hadc1, &config);
 
-    uint32_t sum[3] = {0};
-    const uint16_t CALIB_SAMPLES = 128;
+    uint64_t sum[3] = {0U};
+    uint32_t valid_samples = 0U;
+    g_adc_calibrated = 0U;
+    adc_start_err = 0;
+    adc_timeout_err = 0;
+    adc_restor_fail = 0;
 
-    for (uint16_t i = 0; i < CALIB_SAMPLES; i++)
+    for (uint32_t i = 0U; i < FOC_ADC_OFFSET_SAMPLE_COUNT; i++)
     {
         if (safe_injected_start(&hadc1) != 0)
         {
@@ -305,11 +345,16 @@ void calibrate_current_offset(void)
         sum[0] += HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_1);
         sum[1] += HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_2);
         sum[2] += HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_3);
+        valid_samples++;
     }
 
-    g_adc_offset[0] = sum[0] / CALIB_SAMPLES;
-    g_adc_offset[1] = sum[1] / CALIB_SAMPLES;
-    g_adc_offset[2] = sum[2] / CALIB_SAMPLES;
+    if (valid_samples >= (FOC_ADC_OFFSET_SAMPLE_COUNT / 2U))
+    {
+        g_adc_offset[0] = (float)sum[0] / (float)valid_samples;
+        g_adc_offset[1] = (float)sum[1] / (float)valid_samples;
+        g_adc_offset[2] = (float)sum[2] / (float)valid_samples;
+        g_adc_calibrated = 1U;
+    }
 
     // 5. 恢复硬件触发配置
     config.InjectedSamplingTime = ADC_SAMPLETIME_12CYCLES_5;
@@ -327,51 +372,93 @@ void calibrate_current_offset(void)
     config.InjectedChannel = ADC_CHANNEL_4; config.InjectedRank = ADC_INJECTED_RANK_4;
     HAL_ADCEx_InjectedConfigChannel(&hadc1, &config);
 
-    // 6. 恢复中断并启动
-    __HAL_ADC_ENABLE_IT(&hadc1, ADC_IT_JEOC);
-
+    // 6. HAL 根据 EOCSelection 启用 JEOS 中断并启动
     if (HAL_ADCEx_InjectedStart_IT(&hadc1) != HAL_OK)
     {
         adc_restor_fail = 0x03;
-
+        g_adc_calibrated = 0U;
     }
+
+    ADC_ResetCurrentProcessing();
+    g_adc_sequence_count = 0U;
+    g_adc_control_update_count = 0U;
 }
 
 void ad_sample_process(void)
 {
-    //Biss_start_transfer();
-    // 1. 读取原始值 (顺序对应 Rank 1~4)
-    uint32_t u_raw = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_1);
-    uint32_t v_raw = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_2);
-    uint32_t w_raw = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_3);
-    uint32_t vbus_raw = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_4);
+    const uint16_t raw[4] = {
+        (uint16_t)HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_1),
+        (uint16_t)HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_2),
+        (uint16_t)HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_3),
+        (uint16_t)HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_4)
+    };
+    const uint8_t endpoint = adc_pair_index;
 
-    // 2. 减去零点偏移
-    int16_t ia_raw = u_raw - g_adc_offset[0];
-    int16_t ib_raw = v_raw - g_adc_offset[1];
-    int16_t ic_raw = w_raw - g_adc_offset[2];
+    for (uint32_t channel = 0U; channel < 4U; channel++)
+    {
+        adc_endpoint_raw[endpoint][channel] = raw[channel];
+        g_adc_last_raw[channel] = raw[channel];
+    }
+    g_adc_sequence_count++;
 
-    // 3. 低通滤波 (静态变量保持状态)
-    static float ia_filt = 0, ib_filt = 0, ic_filt = 0;
-    ia_filt = ALPHA * (float)ia_raw + (1.0f - ALPHA) * ia_filt;
-    ib_filt = ALPHA * (float)ib_raw + (1.0f - ALPHA) * ib_filt;
-    ic_filt = ALPHA * (float)ic_raw + (1.0f - ALPHA) * ic_filt;
+    /* 第一端点只缓存；第二端点到达后才形成一组20 kHz控制数据。 */
+    if (endpoint == 0U)
+    {
+        adc_pair_index = 1U;
+        g_adc_pair_pending = 1U;
+        return;
+    }
+    adc_pair_index = 0U;
+    g_adc_pair_pending = 0U;
 
-    // 4. 转换为物理量
-    g_adc_current[0] = ia_filt * ADC1CURT;
-    g_adc_current[1] = ib_filt * ADC1CURT;
-    g_adc_current[2] = ic_filt * ADC1CURT;
-    g_adc_vbus = (float)vbus_raw * ADC1VOLT;
+    float endpoint_common_counts[FOC_ADC_SEQUENCES_PER_CONTROL] = {0.0f};
+    for (uint32_t sample = 0U;
+         sample < FOC_ADC_SEQUENCES_PER_CONTROL;
+         sample++)
+    {
+        for (uint32_t phase = 0U; phase < 3U; phase++)
+        {
+            endpoint_common_counts[sample] +=
+                (float)adc_endpoint_raw[sample][phase] - g_adc_offset[phase];
+        }
+        endpoint_common_counts[sample] /= 3.0f;
+    }
 
-    // 5. 三相平衡处理 (消除共模误差)
-    float mid_offset = (g_adc_current[0] + g_adc_current[1] + g_adc_current[2]) / 3.0f;
-    g_adc_current[0] -= mid_offset;
-    g_adc_current[1] -= mid_offset;
-    g_adc_current[2] -= mid_offset;
+    for (uint32_t phase = 0U; phase < 3U; phase++)
+    {
+        const float first_counts =
+            (float)adc_endpoint_raw[0][phase] - g_adc_offset[phase] -
+            endpoint_common_counts[0];
+        const float second_counts =
+            (float)adc_endpoint_raw[1][phase] - g_adc_offset[phase] -
+            endpoint_common_counts[1];
+        g_adc_endpoint_delta_current[phase] =
+            (second_counts - first_counts) * ADC1CURT;
 
-    // 6. 调用 FOC 控制循环
+        const float averaged_counts =
+            0.5f * ((float)adc_endpoint_raw[0][phase] +
+                    (float)adc_endpoint_raw[1][phase]) -
+            g_adc_offset[phase];
+        adc_current_filtered_counts[phase] =
+            FOC_CURRENT_FILTER_ALPHA * averaged_counts +
+            (1.0f - FOC_CURRENT_FILTER_ALPHA) *
+                adc_current_filtered_counts[phase];
+        g_adc_current[phase] = adc_current_filtered_counts[phase] * ADC1CURT;
+    }
+
+    g_adc_vbus =
+        0.5f * ((float)adc_endpoint_raw[0][3] +
+                (float)adc_endpoint_raw[1][3]) * ADC1VOLT;
+
+    /* 三相和强制为零，只消除共模误差，差分误差仍保留在诊断量中。 */
+    const float current_common =
+        (g_adc_current[0] + g_adc_current[1] + g_adc_current[2]) / 3.0f;
+    g_adc_current[0] -= current_common;
+    g_adc_current[1] -= current_common;
+    g_adc_current[2] -= current_common;
+
+    g_adc_control_update_count++;
     Control_Loop();
-
 }
 
 // ----- 温度读取 (规则通道) -----
@@ -399,14 +486,18 @@ uint16_t adc_read_regular(uint32_t ch)
 float read_temperature(void)
 {
 
-    uint16_t raw = adc_read_regular(ADC_Temp_Pin);
+    uint16_t raw = adc_read_regular(ADC_CHANNEL_6);
     g_adc_temp = (float)raw; // 或者在这里做温度转换公式
     return g_adc_temp;
 }
 
 void adc_foc_init(void)
 {
-  HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
+  if (HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED) != HAL_OK) {
+    adc_start_err = 0x04;
+    g_adc_calibrated = 0U;
+    return;
+  }
   calibrate_current_offset();  // 电流零点校准
 }
 

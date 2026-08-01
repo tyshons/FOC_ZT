@@ -1,5 +1,5 @@
 //
-// Created by tyshon on 2026/3/18.
+// 创建于 2026/3/18。
 //
 
 #ifndef FOC_ZT_SETPARA_H
@@ -28,6 +28,7 @@ typedef struct {
   float derivative;
   float last_error;
   uint32_t last_update_time_us;
+  bool has_previous_update;
 
   // 配置标志
   bool enabled;
@@ -49,4 +50,4 @@ void PID_Reset(PID_TypeDef* pid);
 // 计算函数
 float PID_Update(PID_TypeDef* pid, float error, uint32_t current_time_us);
 
-#endif //FOC_ZT_SETPARA_H
+#endif

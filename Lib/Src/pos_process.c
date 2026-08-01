@@ -1,5 +1,5 @@
 //
-// Created by tyshon on 2026/5/25.
+// 创建于 2026/5/25。
 //
 
 #include "pos_process.h"
@@ -7,69 +7,88 @@
 #include <math.h>
 #include <stdint.h>
 
-#include "stm32g4xx_hal.h"
+#include "Experiment_Config.h"
 
 #define PI 3.14159265358979323846f
-#define SPEED_FILTER_ALPHA 0.1f
 
-static float last_angle = 0.0f;
 static uint8_t is_initialized = 0U;
 static float filtered_speed = 0.0f;
+static float angle_history[FOC_SPEED_ESTIMATOR_WINDOW_UPDATES] = {0.0f};
+static uint32_t angle_history_index = 0U;
+static uint32_t angle_history_count = 0U;
 
 void Encoder_Speed_Reset(float current_angle_deg)
 {
-  last_angle = current_angle_deg;
+  for (uint32_t index = 0U;
+       index < FOC_SPEED_ESTIMATOR_WINDOW_UPDATES;
+       index++) {
+    angle_history[index] = current_angle_deg;
+  }
+  angle_history_index = 0U;
+  angle_history_count = 0U;
   filtered_speed = 0.0f;
   is_initialized = 1U;
 }
 
-void Encoder_Speed_Update(float *speed_out,const float *current_angle_sp) {
-  const float dt = 0.00025f;
-
-  if (speed_out == NULL || current_angle_sp == NULL) {
+void Encoder_Speed_Update(float *speed_out,const float *current_angle_sp,float sample_period_s) {
+  if ((speed_out == NULL) ||
+      (current_angle_sp == NULL) ||
+      (sample_period_s <= 0.0f)) {
     return;
   }
 
   float current_angle = * current_angle_sp ;
 
   if (!is_initialized) {
-    last_angle = current_angle;
-    filtered_speed = 0.0f;
+    Encoder_Speed_Reset(current_angle);
     *speed_out = 0.0f;
-    is_initialized = 1;
     return;
   }
-  //uint32_t current_time = HAL_GetTick();
 
-  float delta_angle = current_angle - last_angle;
+  const float previous_angle = angle_history[angle_history_index];
+  angle_history[angle_history_index] = current_angle;
+  angle_history_index++;
+  if (angle_history_index >= FOC_SPEED_ESTIMATOR_WINDOW_UPDATES) {
+    angle_history_index = 0U;
+  }
+
+  if (angle_history_count < FOC_SPEED_ESTIMATOR_WINDOW_UPDATES) {
+    angle_history_count++;
+    if (angle_history_count < FOC_SPEED_ESTIMATOR_WINDOW_UPDATES) {
+      *speed_out = 0.0f;
+      return;
+    }
+  }
+
+  float delta_angle = current_angle - previous_angle;
 
   if (delta_angle > 180.0f)  delta_angle -= 360.0f;
   if (delta_angle < -180.0f) delta_angle += 360.0f;
 
-  float instant_speed = delta_angle / (dt * 6.0f); //rpm
+  const float window_period_s =
+      sample_period_s * (float)FOC_SPEED_ESTIMATOR_WINDOW_UPDATES;
+  const float instant_speed = delta_angle / (window_period_s * 6.0f);
 
-  filtered_speed = SPEED_FILTER_ALPHA * instant_speed +
-                     (1.0f - SPEED_FILTER_ALPHA) * filtered_speed;
+  filtered_speed +=
+      FOC_SPEED_FILTER_ALPHA * (instant_speed - filtered_speed);
   *speed_out = filtered_speed;
-
-  last_angle = current_angle;
 
 }
 
 void Get_Electrical_Angle(float *theta_out,const float *current_angle_sp) {
-  static float theta_filt = 0.0f;
-  float angle_offset = 96.0f;
+  if ((theta_out == NULL) || (current_angle_sp == NULL)) {
+    return;
+  }
 
-  float theta_mech = ((*current_angle_sp - angle_offset) / 180.0f) * PI;
+  float theta_mech =
+      ((*current_angle_sp - MOTOR_ELECTRICAL_OFFSET_DEG) / 180.0f) * PI;
 
-  float theta_elec = theta_mech * 20.0f;
+  float theta_elec = theta_mech * MOTOR_POLE_PAIRS;
 
   theta_elec = fmodf(theta_elec, 2.0f * PI);
   if (theta_elec < 0) {
     theta_elec += 2.0f * PI;
   }
-
-  //theta_filt = 0.8f * theta_elec + 0.2f * theta_filt;
 
   *theta_out = theta_elec;
 }

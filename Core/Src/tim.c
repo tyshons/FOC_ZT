@@ -47,6 +47,11 @@ void MX_TIM1_Init(void)
   htim1.Init.CounterMode = TIM_COUNTERMODE_CENTERALIGNED1;
   htim1.Init.Period = 4249;
   htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  /*
+   * 中心对齐模式在两个端点各产生一次更新请求。
+   * RCR=0，使ADC在每个20 kHz PWM周期取得两组完整序列；
+   * ADC层将两组数据平均后只执行一次20 kHz FOC。
+   */
   htim1.Init.RepetitionCounter = 0;
   htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_Base_Init(&htim1) != HAL_OK)
