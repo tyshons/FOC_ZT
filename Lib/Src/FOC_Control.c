@@ -51,6 +51,47 @@ static uint32_t enable_sample_count = 0U;
 static uint32_t enable_start_tick_ms = 0U;
 static uint32_t control_time_us = 0U;
 static uint16_t speed_loop_count = 0U;
+static uint32_t speed_loop_elapsed_us = 0U;
+static uint32_t previous_control_cycle_count = 0U;
+static uint8_t control_cycle_counter_valid = 0U;
+
+static uint32_t measure_control_elapsed_us(void)
+{
+  /*
+   * 用内核周期计数器测量相邻控制回调的真实间隔。
+   * 目标调度仍为20 kHz/4 kHz；这里只修正中断抖动或漏回调造成的时间尺度误差。
+   */
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  if ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0U) {
+    DWT->CYCCNT = 0U;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    control_cycle_counter_valid = 0U;
+  }
+
+  const uint32_t current_cycle_count = DWT->CYCCNT;
+  if (control_cycle_counter_valid == 0U) {
+    previous_control_cycle_count = current_cycle_count;
+    control_cycle_counter_valid = 1U;
+    return FOC_CURRENT_LOOP_PERIOD_US;
+  }
+
+  const uint32_t elapsed_cycles =
+      current_cycle_count - previous_control_cycle_count;
+  previous_control_cycle_count = current_cycle_count;
+  const uint32_t cycles_per_us = SystemCoreClock / 1000000U;
+  if (cycles_per_us == 0U) {
+    return FOC_CURRENT_LOOP_PERIOD_US;
+  }
+
+  const uint32_t elapsed_us =
+      (elapsed_cycles + (cycles_per_us / 2U)) / cycles_per_us;
+  /* 调试器暂停或周期计数异常时，不把长停顿灌入PID积分。 */
+  if ((elapsed_us < (FOC_CURRENT_LOOP_PERIOD_US / 4U)) ||
+      (elapsed_us > 1000U)) {
+    return FOC_CURRENT_LOOP_PERIOD_US;
+  }
+  return elapsed_us;
+}
 
 static float shortest_angle_error_deg(float target_deg, float actual_deg)
 {
@@ -81,6 +122,8 @@ static void reset_control_state(void)
   u_q = 0.0f;
   foc_control_mode = FOC_CONTROL_MODE_POSITION;
   speed_loop_count = 0U;
+  speed_loop_elapsed_us = 0U;
+  control_cycle_counter_valid = 0U;
   Experiment_Control_FastDisable();
 }
 
@@ -172,7 +215,8 @@ uint8_t FOC_IsPositionTargetValid(void)
 
 
 void Control_Loop(void) {
-  control_time_us += FOC_CURRENT_LOOP_PERIOD_US;
+  const uint32_t elapsed_control_us = measure_control_elapsed_us();
+  control_time_us += elapsed_control_us;
   const uint32_t current_time = control_time_us;
   ssi_process();
   Get_Electrical_Angle(&theta,&current_angle_sp);
@@ -206,12 +250,16 @@ void Control_Loop(void) {
   }
 
   speed_loop_count++;
+  speed_loop_elapsed_us += elapsed_control_us;
 
   if (speed_loop_count >= FOC_SPEED_LOOP_DIVIDER) {
     speed_loop_count = 0U;
+    const float measured_speed_period_s =
+        (float)speed_loop_elapsed_us / 1000000.0f;
+    speed_loop_elapsed_us = 0U;
     Encoder_Speed_Update(&current_speed_sp,
                          &current_angle_sp,
-                         FOC_SPEED_LOOP_PERIOD_S);
+                         measured_speed_period_s);
     if (foc_control_mode == FOC_CONTROL_MODE_POSITION) {
       float position_error = shortest_angle_error_deg(position_given_sp, current_angle_sp);
       speed_given_sp = PID_Update(&position_pid_inst, position_error, current_time);

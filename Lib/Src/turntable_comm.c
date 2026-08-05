@@ -4,6 +4,8 @@
 #include "PID_Control.h"
 #include "Experiment_Config.h"
 #include "Experiment_Control.h"
+#include "Experiment_ESO.h"
+#include "Experiment_LearningFeedforward.h"
 #include "ssi.h"
 #include "usart.h"
 
@@ -43,6 +45,12 @@
 #define TT_EXT_SPEED_REPORT 0x17U
 #define TT_EXT_HEALTH_REPORT 0x18U
 #define TT_EXT_ADC_DIAGNOSTIC_REPORT 0x19U
+#define TT_EXT_SWEEP_RESULT_REPORT 0x1AU
+#define TT_EXT_ESO_CONFIG 0x1BU
+#define TT_EXT_ESO_REPORT 0x1CU
+#define TT_EXT_LFF_REPORT 0x1DU
+#define TT_EXT_LFF_ORDER_REPORT 0x1EU
+#define TT_EXT_LFF_TABLE_REPORT 0x1FU
 
 #define TT_AXIS_AZ      0x00U
 #define TT_UART_HANDLE  huart1
@@ -59,6 +67,11 @@ static void send_telemetry_frame(void);
 static void send_health_report(void);
 static void send_adc_diagnostic_report(void);
 static void send_speed_report(uint8_t accepted);
+static void send_sweep_result_report(uint8_t order);
+static void send_eso_report(void);
+static void send_lff_report(void);
+static void send_lff_order_report(uint8_t order);
+static void send_lff_table_report(uint16_t start_bin);
 
 typedef enum {
   TT_RX_WAIT_HEAD0 = 0,
@@ -86,7 +99,7 @@ static uint8_t tt_rx_queue_len[TT_RX_QUEUE_DEPTH];
 static uint8_t tt_rx_queue[TT_RX_QUEUE_DEPTH][TT_RX_MAX_FRAME_SIZE];
 
 static volatile uint8_t tt_tx_busy;
-static uint8_t tt_tx_buf[40];
+static uint8_t tt_tx_buf[128];
 
 volatile uint32_t tt_status_tx_count;
 volatile uint32_t tt_status_tx_error_count;
@@ -97,6 +110,7 @@ volatile uint32_t tt_rx_invalid_frame_count;
 
 static TT_FeatureState tt_servo_features;
 static TT_FeatureState tt_tracking_features;
+static volatile uint8_t tt_eso_config_accepted = 1U;
 
 uint8_t Turntable_Comm_IsEnabled(void)
 {
@@ -139,6 +153,25 @@ static float read_le_float(const uint8_t *p)
 static void write_le_float(uint8_t *p, float value)
 {
   memcpy(p, &value, sizeof(value));
+}
+
+static uint16_t read_le_u16(const uint8_t *p)
+{
+  return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+}
+
+static uint32_t read_le_u32(const uint8_t *p)
+{
+  return (uint32_t)p[0] |
+         ((uint32_t)p[1] << 8) |
+         ((uint32_t)p[2] << 16) |
+         ((uint32_t)p[3] << 24);
+}
+
+static void write_le_u16(uint8_t *p, uint16_t value)
+{
+  p[0] = (uint8_t)(value & 0xFFU);
+  p[1] = (uint8_t)((value >> 8) & 0xFFU);
 }
 
 static void write_le_u32(uint8_t *p, uint32_t value)
@@ -409,19 +442,427 @@ static void send_experiment_report(void)
 }
 
 /*
- * 实验配置帧，共16字节：
+ * 实验配置帧，新版20字节并兼容旧版16字节：
  *   A5 5A 05 15 模式 标志 学习模式 起始阶次 结束阶次
- *   扫频幅值 校验和 0D 0A
+ *   注入幅值 随机种子 校验和 0D 0A
+ * 模式6中注入幅值表示扫频电流；模式4/5中表示训练随机扰动幅值。
  *
  * 标志位：
  *   位0：使能学习
  *   位1：清空学习表
  *   位2：使能固定前馈扫频
  *   位3：清空扫频结果
+ *   位4：允许训练随机扰动（仅学习正在运行时实际注入）
  *
  * 功能码为0x15的7字节帧表示查询实验状态。
  */
-static void apply_experiment_config(const uint8_t *frame)
+/*
+ * 单阶扫频结果回报，共37字节：
+ *   A5 5A 05 1A 阶次 有效标志
+ *   基线余弦 基线正弦
+ *   响应余弦 响应正弦 响应幅值
+ *   建议前馈余弦电流 建议前馈正弦电流
+ *   校验和 0D 0A
+ *
+ * 上位机发送A5 5A 05 1A 阶次 校验和 0D 0A逐阶读取。
+ * 本接口只复制结果数组，不改变实验、控制或驱动状态。
+ */
+static void send_sweep_result_report(uint8_t order)
+{
+  if ((order < 1U) || (order > PAPER_LFF_MAX_ORDER) || tt_tx_busy) {
+    return;
+  }
+
+  float baseline_cos_rpm;
+  float baseline_sin_rpm;
+  float response_cos_rpm_per_a;
+  float response_sin_rpm_per_a;
+  float response_magnitude_rpm_per_a;
+  float recommended_cos_current_a;
+  float recommended_sin_current_a;
+  uint8_t result_valid;
+
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  baseline_cos_rpm = g_sweep_baseline_cos_rpm[order];
+  baseline_sin_rpm = g_sweep_baseline_sin_rpm[order];
+  response_cos_rpm_per_a = g_sweep_response_cos_rpm_per_a[order];
+  response_sin_rpm_per_a = g_sweep_response_sin_rpm_per_a[order];
+  response_magnitude_rpm_per_a =
+      g_sweep_response_magnitude_rpm_per_a[order];
+  recommended_cos_current_a = g_sweep_recommended_cos_current_a[order];
+  recommended_sin_current_a = g_sweep_recommended_sin_current_a[order];
+  result_valid = g_sweep_result_valid[order];
+  if ((primask & 1U) == 0U) {
+    __enable_irq();
+  }
+
+  tt_tx_buf[0] = TT_HEAD0;
+  tt_tx_buf[1] = TT_HEAD1;
+  tt_tx_buf[2] = TT_MODE_EXT;
+  tt_tx_buf[3] = TT_EXT_SWEEP_RESULT_REPORT;
+  tt_tx_buf[4] = order;
+  tt_tx_buf[5] = result_valid;
+  write_le_float(&tt_tx_buf[6], baseline_cos_rpm);
+  write_le_float(&tt_tx_buf[10], baseline_sin_rpm);
+  write_le_float(&tt_tx_buf[14], response_cos_rpm_per_a);
+  write_le_float(&tt_tx_buf[18], response_sin_rpm_per_a);
+  write_le_float(&tt_tx_buf[22], response_magnitude_rpm_per_a);
+  write_le_float(&tt_tx_buf[26], recommended_cos_current_a);
+  write_le_float(&tt_tx_buf[30], recommended_sin_current_a);
+  tt_tx_buf[34] = checksum_sum(tt_tx_buf, 2U, 34U);
+  tt_tx_buf[35] = TT_TAIL0;
+  tt_tx_buf[36] = TT_TAIL1;
+
+  tt_tx_busy = 1U;
+  if (HAL_UART_Transmit(&TT_UART_HANDLE, tt_tx_buf, 37U, 5U) != HAL_OK) {
+    tt_status_tx_error_count++;
+  }
+  tt_tx_busy = 0U;
+}
+
+static uint8_t experiment_mode_uses_eso(uint8_t mode)
+{
+  return ((mode == PHYSICAL_EXPERIMENT_ESO) ||
+          (mode == PHYSICAL_EXPERIMENT_ESO_FIXED_FEEDFORWARD) ||
+          (mode == PHYSICAL_EXPERIMENT_ESO_LEARNING_FEEDFORWARD) ||
+          (mode == PHYSICAL_EXPERIMENT_FULL))
+             ? 1U
+             : 0U;
+}
+
+/*
+ * ESO状态回报帧，共67字节：
+ *   A5 5A 05 1C 当前模式 ESO启用 限幅标志 参数接受标志
+ *   带宽 补偿增益 独立限幅 原始补偿 补偿输出 合成Iq
+ *   速度PI 固定前馈 z1 z2 速度观测误差 剩余扰动转矩
+ *   限幅更新次数 总更新次数 校验和 0D 0A
+ */
+static void send_eso_report(void)
+{
+  if (tt_tx_busy) {
+    return;
+  }
+
+  Experiment_Eso_Config config;
+  uint8_t active_mode;
+  uint8_t saturated;
+  uint8_t config_accepted;
+  float iq_eso_raw_a;
+  float iq_eso_a;
+  float iq_composite_a;
+  float iq_feedback_a;
+  float iq_fixed_a;
+  float z1_rad_s;
+  float z2_rad_s2;
+  float speed_error_rad_s;
+  float residual_torque_nm;
+  uint32_t saturation_count;
+  uint32_t update_count;
+
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  config = Experiment_ESO_GetConfig();
+  active_mode = g_experiment_active_mode;
+  saturated = g_eso_saturated;
+  config_accepted = tt_eso_config_accepted;
+  iq_eso_raw_a = g_iq_eso_raw_a;
+  iq_eso_a = g_iq_eso_a;
+  iq_composite_a = g_iq_composite_a;
+  iq_feedback_a = g_iq_feedback_a;
+  iq_fixed_a = g_iq_fixed_feedforward_a;
+  z1_rad_s = g_eso_z1_rad_s;
+  z2_rad_s2 = g_eso_z2_rad_s2;
+  speed_error_rad_s = g_eso_speed_error_rad_s;
+  residual_torque_nm = g_residual_disturbance_nm;
+  saturation_count = g_eso_saturation_count;
+  update_count = g_eso_update_count;
+  if ((primask & 1U) == 0U) {
+    __enable_irq();
+  }
+
+  tt_tx_buf[0] = TT_HEAD0;
+  tt_tx_buf[1] = TT_HEAD1;
+  tt_tx_buf[2] = TT_MODE_EXT;
+  tt_tx_buf[3] = TT_EXT_ESO_REPORT;
+  tt_tx_buf[4] = active_mode;
+  tt_tx_buf[5] = experiment_mode_uses_eso(active_mode);
+  tt_tx_buf[6] = saturated;
+  tt_tx_buf[7] = config_accepted;
+  write_le_float(&tt_tx_buf[8], config.bandwidth_rad_s);
+  write_le_float(&tt_tx_buf[12], config.compensation_gain);
+  write_le_float(&tt_tx_buf[16], config.current_limit_a);
+  write_le_float(&tt_tx_buf[20], iq_eso_raw_a);
+  write_le_float(&tt_tx_buf[24], iq_eso_a);
+  write_le_float(&tt_tx_buf[28], iq_composite_a);
+  write_le_float(&tt_tx_buf[32], iq_feedback_a);
+  write_le_float(&tt_tx_buf[36], iq_fixed_a);
+  write_le_float(&tt_tx_buf[40], z1_rad_s);
+  write_le_float(&tt_tx_buf[44], z2_rad_s2);
+  write_le_float(&tt_tx_buf[48], speed_error_rad_s);
+  write_le_float(&tt_tx_buf[52], residual_torque_nm);
+  write_le_u32(&tt_tx_buf[56], saturation_count);
+  write_le_u32(&tt_tx_buf[60], update_count);
+  tt_tx_buf[64] = checksum_sum(tt_tx_buf, 2U, 64U);
+  tt_tx_buf[65] = TT_TAIL0;
+  tt_tx_buf[66] = TT_TAIL1;
+
+  tt_tx_busy = 1U;
+  if (HAL_UART_Transmit(&TT_UART_HANDLE, tt_tx_buf, 67U, 10U) != HAL_OK) {
+    tt_status_tx_error_count++;
+  }
+  tt_tx_busy = 0U;
+}
+
+/*
+ * 学习前馈状态回报帧，共80字节。前48字节保持旧字段顺序，新增：
+ * 全局rho、直流/交流学习电流、交流表均值、实际训练扰动、配置幅值、
+ * 随机种子，以及扰动使能/冻结标志。
+ */
+static void send_lff_report(void)
+{
+  if (tt_tx_busy) {
+    return;
+  }
+
+  uint8_t active_mode;
+  uint8_t learning_active;
+  uint8_t learning_requested;
+  uint8_t learning_mode;
+  uint8_t active_table_index;
+  uint8_t selected_order_count;
+  uint16_t current_bin;
+  uint32_t revolution_count;
+  uint32_t covered_revolution_count;
+  uint32_t update_count;
+  uint32_t dropped_revolution_count;
+  float last_coverage;
+  float rho_mean;
+  float table_rms_nm;
+  float table_peak_abs_nm;
+  float table_mean_nm;
+  float dc_torque_nm;
+  float global_rho;
+  float iq_learning_a;
+  float iq_learning_dc_a;
+  float iq_learning_ac_a;
+  float iq_training_noise_a;
+  float training_noise_amplitude_a;
+  uint32_t training_noise_seed;
+  uint8_t state_flags;
+
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  active_mode = g_experiment_active_mode;
+  learning_active = g_lff_learning_active;
+  learning_requested = g_learning_update_request;
+  learning_mode = g_learning_mode_request;
+  active_table_index = g_lff_active_table_index;
+  selected_order_count = g_lff_selected_order_count;
+  current_bin = g_lff_current_bin;
+  revolution_count = g_lff_revolution_count;
+  covered_revolution_count = g_lff_covered_revolution_count;
+  update_count = g_lff_update_count;
+  dropped_revolution_count = g_lff_dropped_revolution_count;
+  last_coverage = g_lff_last_coverage;
+  rho_mean = g_lff_rho_mean;
+  table_rms_nm = g_lff_table_rms_nm;
+  table_peak_abs_nm = g_lff_table_peak_abs_nm;
+  table_mean_nm = g_lff_table_mean_nm;
+  dc_torque_nm = g_lff_dc_torque_nm;
+  global_rho = g_lff_global_rho;
+  iq_learning_a = g_iq_learning_feedforward_a;
+  iq_learning_dc_a = g_iq_learning_dc_a;
+  iq_learning_ac_a = g_iq_learning_ac_a;
+  iq_training_noise_a = g_iq_training_noise_a;
+  training_noise_amplitude_a = g_training_noise_amplitude_request_a;
+  training_noise_seed = g_training_noise_seed_request;
+  state_flags =
+      (g_training_noise_enable_request != 0U ? 0x01U : 0x00U) |
+      (((learning_requested == 0U) && (update_count > 0U))
+           ? 0x02U
+           : 0x00U);
+  if ((primask & 1U) == 0U) {
+    __enable_irq();
+  }
+
+  float table_rms_a = 0.0f;
+  float table_peak_abs_a = 0.0f;
+  float table_mean_a = 0.0f;
+  float dc_current_a = iq_learning_dc_a;
+  if (MOTOR_TORQUE_CONSTANT_NM_PER_A > 0.0f) {
+    table_rms_a = table_rms_nm / MOTOR_TORQUE_CONSTANT_NM_PER_A;
+    table_peak_abs_a =
+        table_peak_abs_nm / MOTOR_TORQUE_CONSTANT_NM_PER_A;
+    table_mean_a = table_mean_nm / MOTOR_TORQUE_CONSTANT_NM_PER_A;
+    dc_current_a = dc_torque_nm / MOTOR_TORQUE_CONSTANT_NM_PER_A;
+  }
+
+  tt_tx_buf[0] = TT_HEAD0;
+  tt_tx_buf[1] = TT_HEAD1;
+  tt_tx_buf[2] = TT_MODE_EXT;
+  tt_tx_buf[3] = TT_EXT_LFF_REPORT;
+  tt_tx_buf[4] = active_mode;
+  tt_tx_buf[5] = learning_active;
+  tt_tx_buf[6] = learning_requested;
+  tt_tx_buf[7] = learning_mode;
+  tt_tx_buf[8] = active_table_index;
+  tt_tx_buf[9] = selected_order_count;
+  write_le_u16(&tt_tx_buf[10], current_bin);
+  write_le_u32(&tt_tx_buf[12], revolution_count);
+  write_le_u32(&tt_tx_buf[16], covered_revolution_count);
+  write_le_u32(&tt_tx_buf[20], update_count);
+  write_le_u32(&tt_tx_buf[24], dropped_revolution_count);
+  write_le_float(&tt_tx_buf[28], last_coverage);
+  write_le_float(&tt_tx_buf[32], rho_mean);
+  write_le_float(&tt_tx_buf[36], table_rms_a);
+  write_le_float(&tt_tx_buf[40], table_peak_abs_a);
+  write_le_float(&tt_tx_buf[44], iq_learning_a);
+  write_le_float(&tt_tx_buf[48], global_rho);
+  write_le_float(&tt_tx_buf[52], dc_current_a);
+  write_le_float(&tt_tx_buf[56], iq_learning_ac_a);
+  write_le_float(&tt_tx_buf[60], table_mean_a);
+  write_le_float(&tt_tx_buf[64], iq_training_noise_a);
+  write_le_float(&tt_tx_buf[68], training_noise_amplitude_a);
+  write_le_u32(&tt_tx_buf[72], training_noise_seed);
+  tt_tx_buf[76] = state_flags;
+  tt_tx_buf[77] = checksum_sum(tt_tx_buf, 2U, 77U);
+  tt_tx_buf[78] = TT_TAIL0;
+  tt_tx_buf[79] = TT_TAIL1;
+
+  tt_tx_busy = 1U;
+  if (HAL_UART_Transmit(&TT_UART_HANDLE, tt_tx_buf, 80U, 10U) != HAL_OK) {
+    tt_status_tx_error_count++;
+  }
+  tt_tx_busy = 0U;
+}
+
+/* 单阶学习诊断回报，共35字节，所有傅里叶系数均换算为q轴电流。 */
+static void send_lff_order_report(uint8_t order)
+{
+  if ((order > PAPER_LFF_MAX_ORDER) || tt_tx_busy) {
+    return;
+  }
+
+  float rho;
+  float residual_a_nm;
+  float residual_b_nm;
+  float learned_a_nm;
+  float learned_b_nm;
+  uint32_t update_count;
+  uint8_t learning_mode;
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  rho = g_lff_rho_orders[order];
+  residual_a_nm = g_lff_last_residual_a_nm[order];
+  residual_b_nm = g_lff_last_residual_b_nm[order];
+  learned_a_nm = g_lff_learned_a_nm[order];
+  learned_b_nm = g_lff_learned_b_nm[order];
+  update_count = g_lff_update_count;
+  learning_mode = g_learning_mode_request;
+  if ((primask & 1U) == 0U) {
+    __enable_irq();
+  }
+
+  const float torque_to_current =
+      (MOTOR_TORQUE_CONSTANT_NM_PER_A > 0.0f)
+          ? 1.0f / MOTOR_TORQUE_CONSTANT_NM_PER_A
+          : 0.0f;
+  tt_tx_buf[0] = TT_HEAD0;
+  tt_tx_buf[1] = TT_HEAD1;
+  tt_tx_buf[2] = TT_MODE_EXT;
+  tt_tx_buf[3] = TT_EXT_LFF_ORDER_REPORT;
+  tt_tx_buf[4] = order;
+  tt_tx_buf[5] = (rho > 0.0f) ? 1U : 0U;
+  tt_tx_buf[6] = learning_mode;
+  tt_tx_buf[7] = 0U;
+  write_le_float(&tt_tx_buf[8], rho);
+  write_le_float(&tt_tx_buf[12], residual_a_nm * torque_to_current);
+  write_le_float(&tt_tx_buf[16], residual_b_nm * torque_to_current);
+  write_le_float(&tt_tx_buf[20], learned_a_nm * torque_to_current);
+  write_le_float(&tt_tx_buf[24], learned_b_nm * torque_to_current);
+  write_le_u32(&tt_tx_buf[28], update_count);
+  tt_tx_buf[32] = checksum_sum(tt_tx_buf, 2U, 32U);
+  tt_tx_buf[33] = TT_TAIL0;
+  tt_tx_buf[34] = TT_TAIL1;
+
+  tt_tx_busy = 1U;
+  if (HAL_UART_Transmit(&TT_UART_HANDLE, tt_tx_buf, 35U, 10U) != HAL_OK) {
+    tt_status_tx_error_count++;
+  }
+  tt_tx_busy = 0U;
+}
+
+/* 学习交流表分块回报，共79字节：每帧固定返回16个位置槽。 */
+static void send_lff_table_report(uint16_t start_bin)
+{
+  if (tt_tx_busy) {
+    return;
+  }
+  if (start_bin >= PAPER_LFF_POSITION_BINS) {
+    start_bin = PAPER_LFF_POSITION_BINS - 1U;
+  }
+
+  const uint8_t table_index = g_lff_active_table_index;
+  uint8_t count = 0U;
+  float table_current_a[16] = {0.0f};
+  const float torque_to_current =
+      (MOTOR_TORQUE_CONSTANT_NM_PER_A > 0.0f)
+          ? 1.0f / MOTOR_TORQUE_CONSTANT_NM_PER_A
+          : 0.0f;
+  for (uint32_t index = 0U; index < 16U; ++index) {
+    const uint32_t bin = (uint32_t)start_bin + index;
+    if (bin < PAPER_LFF_POSITION_BINS) {
+      table_current_a[index] =
+          g_lff_table_bank_nm[table_index][bin] * torque_to_current;
+      count++;
+    }
+  }
+
+  tt_tx_buf[0] = TT_HEAD0;
+  tt_tx_buf[1] = TT_HEAD1;
+  tt_tx_buf[2] = TT_MODE_EXT;
+  tt_tx_buf[3] = TT_EXT_LFF_TABLE_REPORT;
+  write_le_u16(&tt_tx_buf[4], start_bin);
+  tt_tx_buf[6] = count;
+  tt_tx_buf[7] = table_index;
+  write_le_float(&tt_tx_buf[8], g_lff_dc_torque_nm * torque_to_current);
+  for (uint32_t index = 0U; index < 16U; ++index) {
+    write_le_float(&tt_tx_buf[12U + 4U * index], table_current_a[index]);
+  }
+  tt_tx_buf[76] = checksum_sum(tt_tx_buf, 2U, 76U);
+  tt_tx_buf[77] = TT_TAIL0;
+  tt_tx_buf[78] = TT_TAIL1;
+
+  tt_tx_busy = 1U;
+  if (HAL_UART_Transmit(&TT_UART_HANDLE, tt_tx_buf, 79U, 10U) != HAL_OK) {
+    tt_status_tx_error_count++;
+  }
+  tt_tx_busy = 0U;
+}
+
+/*
+ * ESO配置帧，共20字节：
+ *   A5 5A 05 1B 标志 带宽 补偿增益 独立限幅 校验和 0D 0A
+ * 配置成功后在临界区内复位观测器，避免4 kHz更新读到半组参数。
+ */
+static void apply_eso_config(const uint8_t *frame)
+{
+  const float bandwidth_rad_s = read_le_float(&frame[5]);
+  const float compensation_gain = read_le_float(&frame[9]);
+  const float current_limit_a = read_le_float(&frame[13]);
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  tt_eso_config_accepted =
+      Experiment_ESO_Configure(bandwidth_rad_s,
+                               compensation_gain,
+                               current_limit_a);
+  if ((primask & 1U) == 0U) {
+    __enable_irq();
+  }
+}
+
+static void apply_experiment_config(const uint8_t *frame, uint8_t len)
 {
   uint8_t mode = frame[4];
   uint8_t flags = frame[5];
@@ -454,10 +895,24 @@ static void apply_experiment_config(const uint8_t *frame)
     if (injection_a < 0.0f) {
       injection_a = -injection_a;
     }
-    if (injection_a > EXPERIMENT_SWEEP_MAX_INJECTION_A) {
-      injection_a = EXPERIMENT_SWEEP_MAX_INJECTION_A;
+    if (mode == PHYSICAL_EXPERIMENT_FIXED_FF_SWEEP) {
+      if (injection_a > EXPERIMENT_SWEEP_MAX_INJECTION_A) {
+        injection_a = EXPERIMENT_SWEEP_MAX_INJECTION_A;
+      }
+      g_sweep_injection_amplitude_request_a = injection_a;
+    } else {
+      if (injection_a > PAPER_LFF_NOISE_MAX_CURRENT_A) {
+        injection_a = PAPER_LFF_NOISE_MAX_CURRENT_A;
+      }
+      g_training_noise_amplitude_request_a = injection_a;
     }
-    g_sweep_injection_amplitude_request_a = injection_a;
+  }
+  if (len == 20U) {
+    uint32_t seed = read_le_u32(&frame[13]);
+    if (seed == 0U) {
+      seed = PAPER_LFF_NOISE_DEFAULT_SEED;
+    }
+    g_training_noise_seed_request = seed;
   }
 
   g_learning_update_request = (flags & 0x01U) ? 1U : 0U;
@@ -468,10 +923,17 @@ static void apply_experiment_config(const uint8_t *frame)
   if ((flags & 0x08U) != 0U) {
     g_sweep_reset_request = 1U;
   }
+  g_training_noise_enable_request =
+      (((flags & 0x10U) != 0U) &&
+       ((mode == PHYSICAL_EXPERIMENT_ESO_LEARNING_FEEDFORWARD) ||
+        (mode == PHYSICAL_EXPERIMENT_FULL)))
+          ? 1U
+          : 0U;
 
   if (g_experiment_mode_request == PHYSICAL_EXPERIMENT_BASELINE) {
     g_learning_update_request = 0U;
     g_sweep_enable_request = 0U;
+    g_training_noise_enable_request = 0U;
   }
 }
 
@@ -487,9 +949,39 @@ static void handle_ext_frame(const uint8_t *frame, uint8_t len)
     return;
   }
 
+  if (len == 8U && frame[3] == TT_EXT_SWEEP_RESULT_REPORT) {
+    send_sweep_result_report(frame[4]);
+    return;
+  }
+
+  if (frame[3] == TT_EXT_ESO_CONFIG) {
+    if (len == 20U) {
+      apply_eso_config(frame);
+      send_eso_report();
+    } else if (len == 7U) {
+      send_eso_report();
+    }
+    return;
+  }
+
+  if (len == 7U && frame[3] == TT_EXT_LFF_REPORT) {
+    send_lff_report();
+    return;
+  }
+
+  if (len == 8U && frame[3] == TT_EXT_LFF_ORDER_REPORT) {
+    send_lff_order_report(frame[4]);
+    return;
+  }
+
+  if (len == 9U && frame[3] == TT_EXT_LFF_TABLE_REPORT) {
+    send_lff_table_report(read_le_u16(&frame[4]));
+    return;
+  }
+
   if (frame[3] == TT_EXT_EXPERIMENT_CONFIG) {
-    if (len == 16U) {
-      apply_experiment_config(frame);
+    if ((len == 16U) || (len == 20U)) {
+      apply_experiment_config(frame, len);
       send_experiment_report();
     } else if (len == 7U) {
       send_experiment_report();
