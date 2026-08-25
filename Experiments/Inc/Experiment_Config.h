@@ -72,7 +72,7 @@
 #define EXPERIMENT_FIXED_FF_ORDER2_SIN_CURRENT_A  (-0.113731f)
 #define EXPERIMENT_FIXED_FF_ORDER4_COS_CURRENT_A  (-0.1546590f)
 #define EXPERIMENT_FIXED_FF_ORDER4_SIN_CURRENT_A  (-0.0006816f)
-#define EXPERIMENT_FIXED_FF_GAIN                  ( 0.25f)
+#define EXPERIMENT_FIXED_FF_GAIN                  ( 0.75f)
 
 /*
  * 线性ESO：beta1 = 2*w0，beta2 = w0^2。
@@ -91,16 +91,15 @@
 
 /* 与Simulink实验一致的位置域学习前馈参数。 */
 #define PAPER_LFF_POSITION_BINS         720U
+#define PAPER_LFF_MIN_ORDER             1U
 #define PAPER_LFF_MAX_ORDER             40U
 #define PAPER_LFF_GAMMA                 0.25f
 #define PAPER_LFF_LEAKAGE               1.0f
 /*
- * 0阶平均负载与1~40阶位置扰动分别限幅。
- * 直流项用于承担恒定重力/摩擦负载；交流表只承担位置同步纹波，
- * 避免较大的直流分量挤占位置表幅值并破坏零均值约束。
+ * 与论文一致，学习前馈只保留1~40阶位置同步分量。
+ * 0阶直流负载不进入学习表，由速度PI积分和ESO承担。
  */
-#define PAPER_LFF_DC_TORQUE_LIMIT_NM    0.40f
-#define PAPER_LFF_AC_TORQUE_LIMIT_NM    0.08f
+#define PAPER_LFF_TORQUE_LIMIT_NM       0.08f
 #define PAPER_LFF_RHO_FORGETTING        0.8f
 #define PAPER_LFF_RHO_MIN_PAIRS         4U
 #define PAPER_LFF_RHO_THRESHOLD         0.8f
@@ -126,7 +125,7 @@
 #define EXPERIMENT_PHASE_CURRENT_MAX_A  12.0f
 /* 首轮采样与电角度复核期间启用保守限流；确认无尖叫后再显式放宽。 */
 #define FOC_COMMISSIONING_LIMIT_ENABLED 1U
-#define FOC_COMMISSIONING_IQ_LIMIT_A    5.0f
+#define FOC_COMMISSIONING_IQ_LIMIT_A    10.0f
 #if FOC_COMMISSIONING_LIMIT_ENABLED
 #define EXPERIMENT_IQ_REFERENCE_MAX_A   FOC_COMMISSIONING_IQ_LIMIT_A
 #else
@@ -192,6 +191,11 @@
 
 #if EXPERIMENT_SWEEP_MEASURE_REVOLUTIONS < 2U
 #error "固定前馈扫频至少需要两圈测量数据才能计算样本方差"
+#endif
+
+#if (PAPER_LFF_MIN_ORDER < 1U) || \
+    (PAPER_LFF_MIN_ORDER > PAPER_LFF_MAX_ORDER)
+#error "论文学习前馈只能学习1~M阶非零位置谐波"
 #endif
 
 #endif /* FOC_ZT_EXPERIMENT_CONFIG_H */

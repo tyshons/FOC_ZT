@@ -10,7 +10,6 @@
 
 /* 双缓冲学习表：快速路径只读活动表，后台只写另一个表。 */
 float g_lff_table_bank_nm[2][PAPER_LFF_POSITION_BINS];
-static float dc_bank_nm[2];
 volatile uint8_t g_lff_active_table_index = 0U;
 volatile uint16_t g_lff_current_bin = 0U;
 volatile float g_lff_rho_mean = 0.0f;
@@ -116,7 +115,6 @@ void Position_Learning_Init(void) {
 void Position_Learning_ResetAll(void) {
   /* 此函数只应由初始化或后台复位路径调用，避免快速环清大数组。 */
   memset(g_lff_table_bank_nm, 0, sizeof(g_lff_table_bank_nm));
-  memset(dc_bank_nm, 0, sizeof(dc_bank_nm));
   memset(g_lff_rho_orders, 0, sizeof(g_lff_rho_orders));
   memset(g_lff_last_residual_a_nm, 0,
          sizeof(g_lff_last_residual_a_nm));
@@ -165,12 +163,11 @@ void Position_Learning_AbortCollection(void) {
 }
 
 float Position_Learning_GetOutput(float theta_rad) {
-  /* 直流负载与零均值位置表分开保存，输出时再合成。 */
+  /* 论文只允许非零阶位置同步分量进入学习前馈，位置表始终保持零均值。 */
   const uint16_t bin = AngleToBin(theta_rad);
   const uint8_t table_bank = g_lff_active_table_index;
   g_lff_current_bin = bin;
-  return dc_bank_nm[table_bank] +
-         g_lff_table_bank_nm[table_bank][bin];
+  return g_lff_table_bank_nm[table_bank][bin];
 }
 
 void Position_Learning_Sample(float theta_rad,
@@ -214,8 +211,7 @@ void Position_Learning_Sample(float theta_rad,
   uint16_t *const count = &profile_sample_count[active_profile_bank][bin];
   if (*count < UINT16_MAX) {
     const uint8_t table_bank = g_lff_active_table_index;
-    const float table_value = dc_bank_nm[table_bank] +
-        g_lff_table_bank_nm[table_bank][bin];
+    const float table_value = g_lff_table_bank_nm[table_bank][bin];
     profile_sum_nm[active_profile_bank][bin] +=
         residual_torque_nm + table_value;
     (*count)++;
@@ -268,6 +264,7 @@ void Position_Learning_Background(void) {
   float current_a[PAPER_LFF_MAX_ORDER + 1U] = {0.0f};
   float current_b[PAPER_LFF_MAX_ORDER + 1U] = {0.0f};
 
+  /* 0阶仅保留为原始轮廓均值诊断量，不参与可信度计算和学习表更新。 */
   float mean = 0.0f;
   for (uint32_t bin = 0U; bin < PAPER_LFF_POSITION_BINS; ++bin) {
     mean += current_profile_nm[bin];
@@ -303,7 +300,9 @@ void Position_Learning_Background(void) {
     const float forgetting = PAPER_LFF_RHO_FORGETTING;
     const float new_weight = 1.0f - forgetting;
 
-    for (uint32_t order = 0U; order <= PAPER_LFF_MAX_ORDER; ++order) {
+    for (uint32_t order = PAPER_LFF_MIN_ORDER;
+         order <= PAPER_LFF_MAX_ORDER;
+         ++order) {
       const float cross = current_a[order] * previous_a[order] +
                           current_b[order] * previous_b[order];
       const float previous_energy =
@@ -356,7 +355,10 @@ void Position_Learning_Background(void) {
   float total_energy = 0.0f;
   float trusted_energy = 0.0f;
   uint8_t selected_order_count = 0U;
-  for (uint32_t order = 0U; order <= PAPER_LFF_MAX_ORDER; ++order) {
+  g_lff_rho_orders[0] = 0.0f;
+  for (uint32_t order = PAPER_LFF_MIN_ORDER;
+       order <= PAPER_LFF_MAX_ORDER;
+       ++order) {
     float rho = 0.0f;
     if (correlation_ready != 0U) {
       const float denominator =
@@ -385,9 +387,7 @@ void Position_Learning_Background(void) {
       }
     }
     g_lff_rho_orders[order] = rho;
-    const float energy_weight = (order == 0U) ? 1.0f : 0.5f;
-    const float order_energy =
-        energy_weight * current_energy_average[order];
+    const float order_energy = 0.5f * current_energy_average[order];
     total_energy += order_energy;
     if (rho > 0.0f) {
       trusted_energy += order_energy;
@@ -397,11 +397,13 @@ void Position_Learning_Background(void) {
   g_lff_rho_mean =
       (total_energy > LFF_EPSILON) ? trusted_energy / total_energy : 0.0f;
 
-  /* 全局学习率使用所有阶次的能量加权相关性，不再取逐阶rho算术平均。 */
-  float global_cross = cross_average[0];
-  float global_previous_energy = previous_energy_average[0];
-  float global_current_energy = current_energy_average[0];
-  for (uint32_t order = 1U; order <= PAPER_LFF_MAX_ORDER; ++order) {
+  /* 全局学习率只汇总论文定义的非零阶，不再让直流负载主导相关性。 */
+  float global_cross = 0.0f;
+  float global_previous_energy = 0.0f;
+  float global_current_energy = 0.0f;
+  for (uint32_t order = PAPER_LFF_MIN_ORDER;
+       order <= PAPER_LFF_MAX_ORDER;
+       ++order) {
     global_cross += 0.5f * cross_average[order];
     global_previous_energy += 0.5f * previous_energy_average[order];
     global_current_energy += 0.5f * current_energy_average[order];
@@ -420,36 +422,30 @@ void Position_Learning_Background(void) {
     can_update = 1U;
     g_lff_rho_mean = 1.0f;
     g_lff_global_rho = 1.0f;
-    for (uint32_t order = 0U; order <= PAPER_LFF_MAX_ORDER; ++order) {
+    g_lff_rho_orders[0] = 0.0f;
+    for (uint32_t order = PAPER_LFF_MIN_ORDER;
+         order <= PAPER_LFF_MAX_ORDER;
+         ++order) {
       g_lff_rho_orders[order] = 1.0f;
     }
-    selected_order_count = PAPER_LFF_MAX_ORDER + 1U;
+    selected_order_count =
+        PAPER_LFF_MAX_ORDER - PAPER_LFF_MIN_ORDER + 1U;
   } else if (correlation_ready != 0U) {
     can_update = 1U;
   }
   g_lff_selected_order_count = selected_order_count;
 
   if (can_update != 0U) {
-    /* 0阶独立更新；位置表只由1~40阶重构并强制保持零均值。 */
+    /* 只由论文定义的1~40阶重构学习表，并强制保持零均值。 */
     const uint8_t read_table = g_lff_active_table_index;
     const uint8_t write_table = (uint8_t)(1U - read_table);
-    const float zero_order_weight =
-        (pending_mode == POSITION_LFF_MODE_GLOBAL)
-            ? g_lff_global_rho
-            : g_lff_rho_orders[0];
-    const float dc_target_nm = zero_order_weight * current_a[0];
-    const float dc_updated_nm =
-        PAPER_LFF_LEAKAGE * dc_bank_nm[read_table] +
-        PAPER_LFF_GAMMA * (dc_target_nm - dc_bank_nm[read_table]);
-    dc_bank_nm[write_table] =
-        ClampFloat(dc_updated_nm,
-                   -PAPER_LFF_DC_TORQUE_LIMIT_NM,
-                   PAPER_LFF_DC_TORQUE_LIMIT_NM);
 
     for (uint32_t bin = 0U; bin < PAPER_LFF_POSITION_BINS; ++bin) {
       learning_profile_nm[bin] = 0.0f;
     }
-    for (uint32_t order = 1U; order <= PAPER_LFF_MAX_ORDER; ++order) {
+    for (uint32_t order = PAPER_LFF_MIN_ORDER;
+         order <= PAPER_LFF_MAX_ORDER;
+         ++order) {
       const float weight =
           (pending_mode == POSITION_LFF_MODE_GLOBAL)
               ? g_lff_global_rho
@@ -492,8 +488,8 @@ void Position_Learning_Background(void) {
           fmaxf(unscaled_peak_abs_nm, fabsf(zero_mean));
     }
     const float table_scale =
-        (unscaled_peak_abs_nm > PAPER_LFF_AC_TORQUE_LIMIT_NM)
-            ? PAPER_LFF_AC_TORQUE_LIMIT_NM / unscaled_peak_abs_nm
+        (unscaled_peak_abs_nm > PAPER_LFF_TORQUE_LIMIT_NM)
+            ? PAPER_LFF_TORQUE_LIMIT_NM / unscaled_peak_abs_nm
             : 1.0f;
 
     float published_sum_nm = 0.0f;
@@ -509,9 +505,11 @@ void Position_Learning_Background(void) {
           fmaxf(table_peak_abs_nm, fabsf(published_value));
     }
 
-    g_lff_learned_a_nm[0] = dc_bank_nm[write_table];
+    g_lff_learned_a_nm[0] = 0.0f;
     g_lff_learned_b_nm[0] = 0.0f;
-    for (uint32_t order = 1U; order <= PAPER_LFF_MAX_ORDER; ++order) {
+    for (uint32_t order = PAPER_LFF_MIN_ORDER;
+         order <= PAPER_LFF_MAX_ORDER;
+         ++order) {
       const float weight =
           (pending_mode == POSITION_LFF_MODE_GLOBAL)
               ? g_lff_global_rho
@@ -528,7 +526,8 @@ void Position_Learning_Background(void) {
       g_lff_learned_b_nm[order] = updated_b * table_scale;
     }
 
-    g_lff_dc_torque_nm = dc_bank_nm[write_table];
+    /* 保留协议字段但固定为零，避免改变现有上下位机通信布局。 */
+    g_lff_dc_torque_nm = 0.0f;
     g_lff_table_mean_nm =
         published_sum_nm / (float)PAPER_LFF_POSITION_BINS;
     g_lff_table_rms_nm =

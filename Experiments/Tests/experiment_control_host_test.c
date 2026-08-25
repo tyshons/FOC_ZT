@@ -114,23 +114,28 @@ int main(void) {
   assert(g_lff_covered_revolution_count == 1U);
   assert(g_lff_update_count == 1U);
   assert(g_lff_last_coverage >= PAPER_LFF_MIN_COVERAGE);
-  assert(g_lff_selected_order_count == PAPER_LFF_MAX_ORDER + 1U);
+  assert(g_lff_selected_order_count ==
+         PAPER_LFF_MAX_ORDER - PAPER_LFF_MIN_ORDER + 1U);
+  assert(IsClose(g_lff_rho_orders[0], 0.0f, 1.0e-7f));
   assert(g_lff_table_rms_nm > 0.0f);
   assert(g_lff_table_peak_abs_nm > g_lff_table_rms_nm);
   const float learned_quadrature =
       Position_Learning_GetOutput(0.5f * TEST_PI);
   assert(IsClose(learned_quadrature, 0.01f, 7.5e-4f));
 
-  /* 0阶平均负载必须独立保存，1~40阶交流表必须保持零均值。 */
+  /* 与论文一致：0阶只用于诊断，不能进入学习输出；1~40阶表保持零均值。 */
   Position_Learning_ResetAll();
   CompleteLearningProfileRevolutions(
       1U, POSITION_LFF_MODE_ORDINARY, 0.12f, 0.04f);
-  assert(IsClose(g_lff_dc_torque_nm, 0.03f, 7.5e-4f));
+  assert(IsClose(g_lff_last_residual_a_nm[0], 0.12f, 7.5e-4f));
+  assert(IsClose(g_lff_dc_torque_nm, 0.0f, 1.0e-7f));
   assert(fabsf(g_lff_table_mean_nm) < 1.0e-5f);
   assert(IsClose(Position_Learning_GetOutput(0.5f * TEST_PI),
-                 0.04f,
+                 0.01f,
                  1.5e-3f));
-  assert(IsClose(g_lff_learned_a_nm[0], g_lff_dc_torque_nm, 1.0e-6f));
+  assert(IsClose(Position_Learning_GetOutput(0.0f), 0.0f, 1.5e-3f));
+  assert(IsClose(g_lff_learned_a_nm[0], 0.0f, 1.0e-7f));
+  assert(IsClose(g_lff_rho_orders[0], 0.0f, 1.0e-7f));
 
   /* 选择性学习需等到连续系数对数量达到配置值后才提交学习表。 */
   Position_Learning_ResetAll();
@@ -138,8 +143,24 @@ int main(void) {
   assert(g_lff_update_count == 0U);
   CompleteLearningRevolutions(1U, POSITION_LFF_MODE_SELECTIVE);
   assert(g_lff_update_count == 1U);
+  assert(IsClose(g_lff_rho_orders[0], 0.0f, 1.0e-7f));
   assert(g_lff_rho_orders[1] >= PAPER_LFF_RHO_THRESHOLD);
   assert(g_lff_selected_order_count >= 1U);
+
+  /* 全局相关学习同样只能汇总1~40阶，稳定直流负载不得进入输出。 */
+  Position_Learning_ResetAll();
+  CompleteLearningProfileRevolutions(
+      4U, POSITION_LFF_MODE_GLOBAL, 0.12f, 0.04f);
+  assert(g_lff_update_count == 0U);
+  CompleteLearningProfileRevolutions(
+      1U, POSITION_LFF_MODE_GLOBAL, 0.12f, 0.04f);
+  assert(g_lff_update_count == 1U);
+  assert(g_lff_global_rho >= PAPER_LFF_RHO_THRESHOLD);
+  assert(IsClose(g_lff_rho_orders[0], 0.0f, 1.0e-7f));
+  assert(IsClose(g_lff_dc_torque_nm, 0.0f, 1.0e-7f));
+  assert(IsClose(Position_Learning_GetOutput(0.5f * TEST_PI),
+                 0.01f,
+                 1.5e-3f));
 
   /* ESO符号约定必须能够估计并抵消阻力转矩。 */
   Experiment_Control_Init();

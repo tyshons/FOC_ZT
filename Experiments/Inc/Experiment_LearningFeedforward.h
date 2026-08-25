@@ -33,6 +33,7 @@ extern volatile uint8_t g_lff_selected_order_count;
 extern volatile float g_lff_table_rms_nm;
 extern volatile float g_lff_table_peak_abs_nm;
 extern volatile float g_lff_table_mean_nm;
+/* 为兼容现有通信协议保留；论文算法不学习0阶，因此运行时恒为0。 */
 extern volatile float g_lff_dc_torque_nm;
 
 /* 初始化/清除双缓冲学习表及其相关性统计量。 */
