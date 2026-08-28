@@ -7,34 +7,64 @@
 #include "PID_Control.h"
 #include "FOC_Math.h"
 #include "ssi.h"
-#include <math.h>
-#include <stdint.h>
 #include "pos_process.h"
+#include "adc.h"
 #include "Experiment_Config.h"
 #include "Experiment_Control.h"
 
+#include <math.h>
+#include <stdint.h>
+
 #define PI 3.14159265358979323846f
+#define FOC_ENABLE_MIN_FRESH_SAMPLES 2U
 
-float open_loop_theta = 0.0f;
-float open_loop_speed = 80.0f;  // 期望转动的电角速度 (rad/s)
-float open_loop_voltage = 5.0f; // 开环电压 (V)，不要给太大，防止发热
+float open_loop_theta_sp = 0.0f;
+float open_loop_theta_fy = 0.0f;
+float open_loop_speed_sp = 80.0f;
+float open_loop_speed_fy = 80.0f;
+float open_loop_voltage_sp = 5.0f;
+float open_loop_voltage_fy = 5.0f;
 
-// 方位轴控制变量。
 float current_angle_sp = 0.0f;
+float current_angle_fy = 0.0f;
 float current_speed_sp = 0.0f;
-float position_given_sp = 100.0f;
+float current_speed_fy = 0.0f;
+float position_given_sp = 0.0f;
+float position_given_fy = 0.0f;
 float speed_given_sp = 0.0f;
+float speed_given_fy = 0.0f;
 float id_given_sp = 0.0f;
+float id_given_fy = 0.0f;
 float iq_given_sp = 0.0f;
+float iq_given_fy = 0.0f;
 
-float theta;
-float i_alpha = 0.0f , i_beta = 0.0f;
-float i_d = 0.0f, i_q = 0.0f;
-float u_d = 0.0f, u_q = 0.0f;
-float u_alpha, u_beta;
-uint32_t ccrA, ccrB, ccrC;
+float electrical_offset_deg_sp = MOTOR_ELECTRICAL_OFFSET_DEG_SP_DEFAULT;
+float electrical_offset_deg_fy = MOTOR_ELECTRICAL_OFFSET_DEG_FY_DEFAULT;
 
-static volatile FOC_ControlMode foc_control_mode = FOC_CONTROL_MODE_POSITION;
+float theta_sp = 0.0f;
+float theta_fy = 0.0f;
+float i_alpha_sp = 0.0f;
+float i_alpha_fy = 0.0f;
+float i_beta_sp = 0.0f;
+float i_beta_fy = 0.0f;
+float i_d_sp = 0.0f;
+float i_d_fy = 0.0f;
+float i_q_sp = 0.0f;
+float i_q_fy = 0.0f;
+float u_d_sp = 0.0f;
+float u_d_fy = 0.0f;
+float u_q_sp = 0.0f;
+float u_q_fy = 0.0f;
+float u_alpha_sp = 0.0f;
+float u_alpha_fy = 0.0f;
+float u_beta_sp = 0.0f;
+float u_beta_fy = 0.0f;
+uint32_t ccrA_sp = 0U;
+uint32_t ccrA_fy = 0U;
+uint32_t ccrB_sp = 0U;
+uint32_t ccrB_fy = 0U;
+uint32_t ccrC_sp = 0U;
+uint32_t ccrC_fy = 0U;
 
 typedef enum {
   FOC_POWER_DISABLED = 0,
@@ -42,42 +72,63 @@ typedef enum {
   FOC_POWER_ENABLED
 } FOC_PowerState;
 
-#define FOC_ENABLE_MIN_FRESH_SAMPLES 2U
+static volatile FOC_ControlMode foc_control_mode_sp = FOC_CONTROL_MODE_POSITION;
+static volatile FOC_ControlMode foc_control_mode_fy = FOC_CONTROL_MODE_POSITION;
+static volatile FOC_PowerState foc_power_state_sp = FOC_POWER_DISABLED;
+static volatile FOC_PowerState foc_power_state_fy = FOC_POWER_DISABLED;
+static volatile FOC_FaultCode foc_fault_code_sp = FOC_FAULT_NONE;
+static volatile FOC_FaultCode foc_fault_code_fy = FOC_FAULT_NONE;
+static volatile uint8_t foc_position_target_valid_sp = 0U;
+static volatile uint8_t foc_position_target_valid_fy = 0U;
 
-static volatile FOC_PowerState foc_power_state = FOC_POWER_DISABLED;
-static volatile FOC_FaultCode foc_fault_code = FOC_FAULT_NONE;
-static volatile uint8_t foc_position_target_valid = 0U;
-static uint32_t enable_sample_count = 0U;
-static uint32_t enable_start_tick_ms = 0U;
-static uint32_t control_time_us = 0U;
-static uint16_t speed_loop_count = 0U;
-static uint32_t speed_loop_elapsed_us = 0U;
-static uint32_t previous_control_cycle_count = 0U;
-static uint8_t control_cycle_counter_valid = 0U;
+static volatile uint8_t electrical_calibration_active_sp = 0U;
+static volatile uint8_t electrical_calibration_active_fy = 0U;
+static float electrical_calibration_ud_sp = 0.0f;
+static float electrical_calibration_ud_fy = 0.0f;
 
-static uint32_t measure_control_elapsed_us(void)
+static uint32_t enable_sample_count_sp = 0U;
+static uint32_t enable_sample_count_fy = 0U;
+static uint32_t enable_start_tick_ms_sp = 0U;
+static uint32_t enable_start_tick_ms_fy = 0U;
+static uint32_t control_time_us_sp = 0U;
+static uint32_t control_time_us_fy = 0U;
+static uint16_t speed_loop_count_sp = 0U;
+static uint16_t speed_loop_count_fy = 0U;
+static uint8_t ssi_request_count_sp = 0U;
+static uint8_t ssi_request_count_fy = 0U;
+static uint32_t speed_loop_elapsed_us_sp = 0U;
+static uint32_t speed_loop_elapsed_us_fy = 0U;
+static uint32_t previous_control_cycle_count_sp = 0U;
+static uint32_t previous_control_cycle_count_fy = 0U;
+static uint8_t control_cycle_counter_valid_sp = 0U;
+static uint8_t control_cycle_counter_valid_fy = 0U;
+
+static uint32_t measure_control_elapsed_us(FOC_Axis axis)
 {
-  /*
-   * 用内核周期计数器测量相邻控制回调的真实间隔。
-   * 目标调度仍为20 kHz/4 kHz；这里只修正中断抖动或漏回调造成的时间尺度误差。
-   */
+  uint32_t *previous_count = (axis == FOC_AXIS_FY)
+                                 ? &previous_control_cycle_count_fy
+                                 : &previous_control_cycle_count_sp;
+  uint8_t *counter_valid = (axis == FOC_AXIS_FY)
+                               ? &control_cycle_counter_valid_fy
+                               : &control_cycle_counter_valid_sp;
+
   CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
   if ((DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk) == 0U) {
     DWT->CYCCNT = 0U;
     DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
-    control_cycle_counter_valid = 0U;
+    control_cycle_counter_valid_sp = 0U;
+    control_cycle_counter_valid_fy = 0U;
   }
 
-  const uint32_t current_cycle_count = DWT->CYCCNT;
-  if (control_cycle_counter_valid == 0U) {
-    previous_control_cycle_count = current_cycle_count;
-    control_cycle_counter_valid = 1U;
+  const uint32_t current_count = DWT->CYCCNT;
+  if (*counter_valid == 0U) {
+    *previous_count = current_count;
+    *counter_valid = 1U;
     return FOC_CURRENT_LOOP_PERIOD_US;
   }
 
-  const uint32_t elapsed_cycles =
-      current_cycle_count - previous_control_cycle_count;
-  previous_control_cycle_count = current_cycle_count;
+  const uint32_t elapsed_cycles = current_count - *previous_count;
+  *previous_count = current_count;
   const uint32_t cycles_per_us = SystemCoreClock / 1000000U;
   if (cycles_per_us == 0U) {
     return FOC_CURRENT_LOOP_PERIOD_US;
@@ -85,7 +136,6 @@ static uint32_t measure_control_elapsed_us(void)
 
   const uint32_t elapsed_us =
       (elapsed_cycles + (cycles_per_us / 2U)) / cycles_per_us;
-  /* 调试器暂停或周期计数异常时，不把长停顿灌入PID积分。 */
   if ((elapsed_us < (FOC_CURRENT_LOOP_PERIOD_US / 4U)) ||
       (elapsed_us > 1000U)) {
     return FOC_CURRENT_LOOP_PERIOD_US;
@@ -109,291 +159,654 @@ static void restore_interrupt_state(uint32_t primask)
   }
 }
 
-static void reset_control_state(void)
+static uint32_t ssi_valid_sample_count(FOC_Axis axis)
 {
-  PID_Reset(&position_pid_inst);
-  PID_Reset(&speed_pid_inst);
-  PID_Reset(&id_pid_inst);
-  PID_Reset(&iq_pid_inst);
-  speed_given_sp = 0.0f;
-  id_given_sp = 0.0f;
-  iq_given_sp = 0.0f;
-  u_d = 0.0f;
-  u_q = 0.0f;
-  foc_control_mode = FOC_CONTROL_MODE_POSITION;
-  speed_loop_count = 0U;
-  speed_loop_elapsed_us = 0U;
-  control_cycle_counter_valid = 0U;
-  Experiment_Control_FastDisable();
+  return (axis == FOC_AXIS_FY)
+             ? SSI_GetValidSampleCount_fy()
+             : SSI_GetValidSampleCount_sp();
 }
 
-static void set_pwm_neutral(void)
+static uint8_t ssi_frame_is_fresh(FOC_Axis axis)
 {
-  uint32_t neutral_compare = htim1.Init.Period / 2U;
-  ccrA = neutral_compare;
-  ccrB = neutral_compare;
-  ccrC = neutral_compare;
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, neutral_compare);
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, neutral_compare);
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, neutral_compare);
+  return (axis == FOC_AXIS_FY)
+             ? SSI_IsFrameFresh_fy(SSI_MAX_FRAME_AGE_MS)
+             : SSI_IsFrameFresh_sp(SSI_MAX_FRAME_AGE_MS);
 }
 
-static void stop_power_stage(FOC_FaultCode fault_code)
+static void ssi_process_axis(FOC_Axis axis)
 {
-  /* 必须先关闭驱动器，再修改控制状态和定时器输出。 */
-  HAL_GPIO_WritePin(SHUTDOWN_GPIO_Port, SHUTDOWN_Pin, GPIO_PIN_RESET);
-  foc_power_state = FOC_POWER_DISABLED;
-  foc_fault_code = fault_code;
-  reset_control_state();
-  current_speed_sp = 0.0f;
-  position_given_sp = current_angle_sp;
-  foc_position_target_valid =
-      SSI_IsFrameFresh(SSI_MAX_FRAME_AGE_MS) ? 1U : 0U;
-  Encoder_Speed_Reset(current_angle_sp);
-  set_pwm_neutral();
-
-  (void)HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
-  (void)HAL_TIMEx_PWMN_Stop(&htim1, TIM_CHANNEL_1);
-  (void)HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_2);
-  (void)HAL_TIMEx_PWMN_Stop(&htim1, TIM_CHANNEL_2);
-  (void)HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_3);
-  (void)HAL_TIMEx_PWMN_Stop(&htim1, TIM_CHANNEL_3);
-  ADC_ResetCurrentProcessing();
+  if (axis == FOC_AXIS_FY) {
+    ssi_process_fy();
+  } else {
+    ssi_process_sp();
+  }
 }
 
-void FOC_SetPositionTarget(float target_deg)
+static void ssi_rearm_axis(FOC_Axis axis)
 {
-  uint32_t primask = __get_PRIMASK();
+  if (axis == FOC_AXIS_FY) {
+    SSI_RearmValidation_fy();
+  } else {
+    SSI_RearmValidation_sp();
+  }
+}
+
+static void encoder_speed_reset_axis(FOC_Axis axis, float angle_deg)
+{
+  if (axis == FOC_AXIS_FY) {
+    Encoder_Speed_Reset_fy(angle_deg);
+  } else {
+    Encoder_Speed_Reset_sp(angle_deg);
+  }
+}
+
+static void encoder_speed_update_axis(FOC_Axis axis,
+                                      float *speed,
+                                      const float *angle,
+                                      float period_s)
+{
+  if (axis == FOC_AXIS_FY) {
+    Encoder_Speed_Update_fy(speed, angle, period_s);
+  } else {
+    Encoder_Speed_Update_sp(speed, angle, period_s);
+  }
+}
+
+static void adc_reset_axis(FOC_Axis axis)
+{
+  if (axis == FOC_AXIS_FY) {
+    ADC_ResetCurrentProcessing_fy();
+  } else {
+    ADC_ResetCurrentProcessing_sp();
+  }
+}
+
+static void reset_control_state(FOC_Axis axis)
+{
+  if (axis == FOC_AXIS_FY) {
+    PID_Reset(&position_pid_inst_fy);
+    PID_Reset(&speed_pid_inst_fy);
+    PID_Reset(&id_pid_inst_fy);
+    PID_Reset(&iq_pid_inst_fy);
+    speed_given_fy = 0.0f;
+    id_given_fy = 0.0f;
+    iq_given_fy = 0.0f;
+    u_d_fy = 0.0f;
+    u_q_fy = 0.0f;
+    foc_control_mode_fy = FOC_CONTROL_MODE_POSITION;
+    speed_loop_count_fy = 0U;
+    ssi_request_count_fy = 0U;
+    speed_loop_elapsed_us_fy = 0U;
+    control_cycle_counter_valid_fy = 0U;
+  } else {
+    PID_Reset(&position_pid_inst_sp);
+    PID_Reset(&speed_pid_inst_sp);
+    PID_Reset(&id_pid_inst_sp);
+    PID_Reset(&iq_pid_inst_sp);
+    speed_given_sp = 0.0f;
+    id_given_sp = 0.0f;
+    iq_given_sp = 0.0f;
+    u_d_sp = 0.0f;
+    u_q_sp = 0.0f;
+    foc_control_mode_sp = FOC_CONTROL_MODE_POSITION;
+    speed_loop_count_sp = 0U;
+    ssi_request_count_sp = 0U;
+    speed_loop_elapsed_us_sp = 0U;
+    control_cycle_counter_valid_sp = 0U;
+    Experiment_Control_FastDisable();
+  }
+}
+
+static void set_pwm_neutral(FOC_Axis axis)
+{
+  TIM_HandleTypeDef *timer = (axis == FOC_AXIS_FY) ? &htim8 : &htim1;
+  uint32_t *ccr_a = (axis == FOC_AXIS_FY) ? &ccrA_fy : &ccrA_sp;
+  uint32_t *ccr_b = (axis == FOC_AXIS_FY) ? &ccrB_fy : &ccrB_sp;
+  uint32_t *ccr_c = (axis == FOC_AXIS_FY) ? &ccrC_fy : &ccrC_sp;
+  const uint32_t neutral = timer->Init.Period / 2U;
+
+  *ccr_a = neutral;
+  *ccr_b = neutral;
+  *ccr_c = neutral;
+  __HAL_TIM_SET_COMPARE(timer, TIM_CHANNEL_1, neutral);
+  __HAL_TIM_SET_COMPARE(timer, TIM_CHANNEL_2, neutral);
+  __HAL_TIM_SET_COMPARE(timer, TIM_CHANNEL_3, neutral);
+}
+
+static void stop_pwm(FOC_Axis axis)
+{
+  TIM_HandleTypeDef *timer = (axis == FOC_AXIS_FY) ? &htim8 : &htim1;
+  (void)HAL_TIM_PWM_Stop(timer, TIM_CHANNEL_1);
+  (void)HAL_TIMEx_PWMN_Stop(timer, TIM_CHANNEL_1);
+  (void)HAL_TIM_PWM_Stop(timer, TIM_CHANNEL_2);
+  (void)HAL_TIMEx_PWMN_Stop(timer, TIM_CHANNEL_2);
+  (void)HAL_TIM_PWM_Stop(timer, TIM_CHANNEL_3);
+  (void)HAL_TIMEx_PWMN_Stop(timer, TIM_CHANNEL_3);
+}
+
+static void stop_power_stage(FOC_Axis axis, FOC_FaultCode fault_code)
+{
+  volatile FOC_PowerState *power_state = (axis == FOC_AXIS_FY)
+                                               ? &foc_power_state_fy
+                                               : &foc_power_state_sp;
+  volatile FOC_FaultCode *fault = (axis == FOC_AXIS_FY)
+                                      ? &foc_fault_code_fy
+                                      : &foc_fault_code_sp;
+  volatile uint8_t *target_valid = (axis == FOC_AXIS_FY)
+                                       ? &foc_position_target_valid_fy
+                                       : &foc_position_target_valid_sp;
+  volatile uint8_t *calibration_active = (axis == FOC_AXIS_FY)
+                                             ? &electrical_calibration_active_fy
+                                             : &electrical_calibration_active_sp;
+  float *calibration_ud = (axis == FOC_AXIS_FY)
+                              ? &electrical_calibration_ud_fy
+                              : &electrical_calibration_ud_sp;
+  float *current_angle = (axis == FOC_AXIS_FY)
+                             ? &current_angle_fy
+                             : &current_angle_sp;
+  float *current_speed = (axis == FOC_AXIS_FY)
+                             ? &current_speed_fy
+                             : &current_speed_sp;
+  float *position_given = (axis == FOC_AXIS_FY)
+                              ? &position_given_fy
+                              : &position_given_sp;
+
+  *power_state = FOC_POWER_DISABLED;
+  *fault = fault_code;
+  *calibration_active = 0U;
+  *calibration_ud = 0.0f;
+  reset_control_state(axis);
+  *current_speed = 0.0f;
+  *position_given = *current_angle;
+  *target_valid = ssi_frame_is_fresh(axis) ? 1U : 0U;
+  encoder_speed_reset_axis(axis, *current_angle);
+  set_pwm_neutral(axis);
+  stop_pwm(axis);
+  adc_reset_axis(axis);
+}
+
+void FOC_SetPositionTarget(FOC_Axis axis, float target_deg)
+{
+  const uint32_t primask = __get_PRIMASK();
   __disable_irq();
 
-  if (foc_control_mode != FOC_CONTROL_MODE_POSITION) {
-    PID_Reset(&position_pid_inst);
-    PID_Reset(&speed_pid_inst);
+  if (axis == FOC_AXIS_FY) {
+    if (foc_control_mode_fy != FOC_CONTROL_MODE_POSITION) {
+      PID_Reset(&position_pid_inst_fy);
+      PID_Reset(&speed_pid_inst_fy);
+    }
+    electrical_calibration_active_fy = 0U;
+    position_given_fy = target_deg;
+    foc_control_mode_fy = FOC_CONTROL_MODE_POSITION;
+    foc_position_target_valid_fy = 1U;
+  } else {
+    if (foc_control_mode_sp != FOC_CONTROL_MODE_POSITION) {
+      PID_Reset(&position_pid_inst_sp);
+      PID_Reset(&speed_pid_inst_sp);
+    }
+    electrical_calibration_active_sp = 0U;
+    position_given_sp = target_deg;
+    foc_control_mode_sp = FOC_CONTROL_MODE_POSITION;
+    foc_position_target_valid_sp = 1U;
   }
-  position_given_sp = target_deg;
-  foc_control_mode = FOC_CONTROL_MODE_POSITION;
-  foc_position_target_valid = 1U;
 
   restore_interrupt_state(primask);
 }
 
-void FOC_SetSpeedTarget(float target_rpm)
+void FOC_SetSpeedTarget(FOC_Axis axis, float target_rpm)
 {
-  uint32_t primask = __get_PRIMASK();
+  const uint32_t primask = __get_PRIMASK();
   __disable_irq();
 
-  if (foc_control_mode != FOC_CONTROL_MODE_SPEED) {
-    PID_Reset(&speed_pid_inst);
+  if (axis == FOC_AXIS_FY) {
+    if (foc_control_mode_fy != FOC_CONTROL_MODE_SPEED) {
+      PID_Reset(&speed_pid_inst_fy);
+    }
+    electrical_calibration_active_fy = 0U;
+    speed_given_fy = target_rpm;
+    foc_control_mode_fy = FOC_CONTROL_MODE_SPEED;
+    foc_position_target_valid_fy = 0U;
+  } else {
+    if (foc_control_mode_sp != FOC_CONTROL_MODE_SPEED) {
+      PID_Reset(&speed_pid_inst_sp);
+    }
+    electrical_calibration_active_sp = 0U;
+    speed_given_sp = target_rpm;
+    foc_control_mode_sp = FOC_CONTROL_MODE_SPEED;
+    foc_position_target_valid_sp = 0U;
   }
-  speed_given_sp = target_rpm;
-  foc_control_mode = FOC_CONTROL_MODE_SPEED;
-  foc_position_target_valid = 0U;
 
   restore_interrupt_state(primask);
 }
 
-FOC_ControlMode FOC_GetControlMode(void)
+void Control_Loop(FOC_Axis axis)
 {
-  return foc_control_mode;
-}
+  const uint8_t is_fy = (axis == FOC_AXIS_FY) ? 1U : 0U;
+  TIM_HandleTypeDef *timer = is_fy ? &htim8 : &htim1;
+  volatile FOC_ControlMode *control_mode = is_fy
+                                               ? &foc_control_mode_fy
+                                               : &foc_control_mode_sp;
+  volatile FOC_PowerState *power_state = is_fy
+                                             ? &foc_power_state_fy
+                                             : &foc_power_state_sp;
+  volatile uint8_t *target_valid = is_fy
+                                       ? &foc_position_target_valid_fy
+                                       : &foc_position_target_valid_sp;
+  volatile uint8_t *calibration_active = is_fy
+                                             ? &electrical_calibration_active_fy
+                                             : &electrical_calibration_active_sp;
+  uint32_t *enable_sample_count = is_fy
+                                      ? &enable_sample_count_fy
+                                      : &enable_sample_count_sp;
+  uint32_t *enable_start_tick_ms = is_fy
+                                       ? &enable_start_tick_ms_fy
+                                       : &enable_start_tick_ms_sp;
+  uint32_t *control_time_us = is_fy
+                                  ? &control_time_us_fy
+                                  : &control_time_us_sp;
+  uint16_t *speed_loop_count = is_fy
+                                   ? &speed_loop_count_fy
+                                   : &speed_loop_count_sp;
+  uint8_t *ssi_request_count = is_fy
+                                   ? &ssi_request_count_fy
+                                   : &ssi_request_count_sp;
+  uint32_t *speed_loop_elapsed_us = is_fy
+                                        ? &speed_loop_elapsed_us_fy
+                                        : &speed_loop_elapsed_us_sp;
+  PID_TypeDef *position_pid = is_fy
+                                  ? &position_pid_inst_fy
+                                  : &position_pid_inst_sp;
+  PID_TypeDef *speed_pid = is_fy ? &speed_pid_inst_fy : &speed_pid_inst_sp;
+  PID_TypeDef *id_pid = is_fy ? &id_pid_inst_fy : &id_pid_inst_sp;
+  PID_TypeDef *iq_pid = is_fy ? &iq_pid_inst_fy : &iq_pid_inst_sp;
+  float *adc_current = is_fy ? g_adc_current_fy : g_adc_current_sp;
+  float *adc_vbus = is_fy ? &g_adc_vbus_fy : &g_adc_vbus_sp;
+  float *current_angle = is_fy ? &current_angle_fy : &current_angle_sp;
+  float *current_speed = is_fy ? &current_speed_fy : &current_speed_sp;
+  float *position_given = is_fy ? &position_given_fy : &position_given_sp;
+  float *speed_given = is_fy ? &speed_given_fy : &speed_given_sp;
+  float *id_given = is_fy ? &id_given_fy : &id_given_sp;
+  float *iq_given = is_fy ? &iq_given_fy : &iq_given_sp;
+  float *calibration_ud = is_fy
+                              ? &electrical_calibration_ud_fy
+                              : &electrical_calibration_ud_sp;
+  float *electrical_offset = is_fy
+                                 ? &electrical_offset_deg_fy
+                                 : &electrical_offset_deg_sp;
+  float *theta = is_fy ? &theta_fy : &theta_sp;
+  float *i_alpha = is_fy ? &i_alpha_fy : &i_alpha_sp;
+  float *i_beta = is_fy ? &i_beta_fy : &i_beta_sp;
+  float *i_d = is_fy ? &i_d_fy : &i_d_sp;
+  float *i_q = is_fy ? &i_q_fy : &i_q_sp;
+  float *u_d = is_fy ? &u_d_fy : &u_d_sp;
+  float *u_q = is_fy ? &u_q_fy : &u_q_sp;
+  float *u_alpha = is_fy ? &u_alpha_fy : &u_alpha_sp;
+  float *u_beta = is_fy ? &u_beta_fy : &u_beta_sp;
+  uint32_t *ccr_a = is_fy ? &ccrA_fy : &ccrA_sp;
+  uint32_t *ccr_b = is_fy ? &ccrB_fy : &ccrB_sp;
+  uint32_t *ccr_c = is_fy ? &ccrC_fy : &ccrC_sp;
 
-float FOC_GetSpeedTarget(void)
-{
-  return speed_given_sp;
-}
+  const uint32_t elapsed_control_us = measure_control_elapsed_us(axis);
+  *control_time_us += elapsed_control_us;
+  const uint32_t current_time = *control_time_us;
 
-float FOC_GetIqTarget(void)
-{
-  return iq_given_sp;
-}
+  (*ssi_request_count)++;
+  if (*ssi_request_count >= FOC_SPEED_LOOP_DIVIDER) {
+    *ssi_request_count = 0U;
+    ssi_process_axis(axis);
+  }
+  Get_Electrical_Angle(theta, current_angle, *electrical_offset);
 
-uint8_t FOC_IsPositionTargetValid(void)
-{
-  return (foc_position_target_valid &&
-          foc_control_mode == FOC_CONTROL_MODE_POSITION) ? 1U : 0U;
-}
-
-
-void Control_Loop(void) {
-  const uint32_t elapsed_control_us = measure_control_elapsed_us();
-  control_time_us += elapsed_control_us;
-  const uint32_t current_time = control_time_us;
-  ssi_process();
-  Get_Electrical_Angle(&theta,&current_angle_sp);
-
-  if (foc_power_state == FOC_POWER_WAIT_ENCODER) {
-    if (((uint32_t)(SSI_GetValidSampleCount() - enable_sample_count) >=
+  if (*power_state == FOC_POWER_WAIT_ENCODER) {
+    if (((uint32_t)(ssi_valid_sample_count(axis) - *enable_sample_count) >=
          FOC_ENABLE_MIN_FRESH_SAMPLES) &&
-        (SSI_IsFrameFresh(SSI_MAX_FRAME_AGE_MS) != 0U)) {
-      position_given_sp = current_angle_sp;
-      current_speed_sp = 0.0f;
-      Encoder_Speed_Reset(current_angle_sp);
-      reset_control_state();
-      set_pwm_neutral();
-      foc_position_target_valid = 1U;
-      foc_power_state = FOC_POWER_ENABLED;
-      HAL_GPIO_WritePin(SHUTDOWN_GPIO_Port, SHUTDOWN_Pin, GPIO_PIN_SET);
-    } else if ((uint32_t)(HAL_GetTick() - enable_start_tick_ms) >=
+        (ssi_frame_is_fresh(axis) != 0U)) {
+      *position_given = *current_angle;
+      *current_speed = 0.0f;
+      encoder_speed_reset_axis(axis, *current_angle);
+      reset_control_state(axis);
+      set_pwm_neutral(axis);
+      *target_valid = (*calibration_active != 0U) ? 0U : 1U;
+      *power_state = FOC_POWER_ENABLED;
+    } else if ((uint32_t)(HAL_GetTick() - *enable_start_tick_ms) >=
                SSI_ENABLE_ACQUIRE_TIMEOUT_MS) {
-      stop_power_stage(FOC_FAULT_ENCODER_START_TIMEOUT);
+      stop_power_stage(axis, FOC_FAULT_ENCODER_START_TIMEOUT);
     }
     return;
   }
 
-  if (foc_power_state != FOC_POWER_ENABLED) {
+  if (*power_state != FOC_POWER_ENABLED) {
+    return;
+  }
+  if (ssi_frame_is_fresh(axis) == 0U) {
+    stop_power_stage(axis, FOC_FAULT_ENCODER_RUNTIME_TIMEOUT);
     return;
   }
 
-  if (SSI_IsFrameFresh(SSI_MAX_FRAME_AGE_MS) == 0U) {
-    stop_power_stage(FOC_FAULT_ENCODER_RUNTIME_TIMEOUT);
-    return;
-  }
+  (*speed_loop_count)++;
+  *speed_loop_elapsed_us += elapsed_control_us;
+  if (*speed_loop_count >= FOC_SPEED_LOOP_DIVIDER) {
+    *speed_loop_count = 0U;
+    const float speed_period_s =
+        (float)(*speed_loop_elapsed_us) / 1000000.0f;
+    *speed_loop_elapsed_us = 0U;
+    encoder_speed_update_axis(axis, current_speed, current_angle,
+                              speed_period_s);
 
-  speed_loop_count++;
-  speed_loop_elapsed_us += elapsed_control_us;
-
-  if (speed_loop_count >= FOC_SPEED_LOOP_DIVIDER) {
-    speed_loop_count = 0U;
-    const float measured_speed_period_s =
-        (float)speed_loop_elapsed_us / 1000000.0f;
-    speed_loop_elapsed_us = 0U;
-    Encoder_Speed_Update(&current_speed_sp,
-                         &current_angle_sp,
-                         measured_speed_period_s);
-    if (foc_control_mode == FOC_CONTROL_MODE_POSITION) {
-      float position_error = shortest_angle_error_deg(position_given_sp, current_angle_sp);
-      speed_given_sp = PID_Update(&position_pid_inst, position_error, current_time);
+    if (*calibration_active == 0U) {
+      if (*control_mode == FOC_CONTROL_MODE_POSITION) {
+        const float position_error =
+            shortest_angle_error_deg(*position_given, *current_angle);
+        *speed_given = PID_Update(position_pid, position_error, current_time);
+      }
+      const float feedback_iq = PID_Update(
+          speed_pid, *speed_given - *current_speed, current_time);
+      *iq_given = is_fy
+                      ? feedback_iq
+                      : Experiment_Control_Update(*current_angle,
+                                                  *current_speed,
+                                                  feedback_iq);
     }
-    const float feedback_iq = PID_Update(&speed_pid_inst,(speed_given_sp - current_speed_sp),current_time);
-    iq_given_sp = Experiment_Control_Update(current_angle_sp,current_speed_sp,feedback_iq);
   }
 
-  float i_a = -g_adc_current[0];
-  float i_b = -g_adc_current[1];
-  float i_c = -g_adc_current[2];
+  const float i_a = -adc_current[0];
+  const float i_b = -adc_current[1];
+  const float i_c = -adc_current[2];
+  clarke_transform(i_a, i_b, i_c, i_alpha, i_beta);
+  const float theta_sin = sinf(*theta);
+  const float theta_cos = cosf(*theta);
+  *i_d = *i_alpha * theta_cos + *i_beta * theta_sin;
+  *i_q = -*i_alpha * theta_sin + *i_beta * theta_cos;
 
-  clarke_transform(i_a, i_b, i_c, &i_alpha, &i_beta);
-  park_transform(i_alpha, i_beta, theta, &i_d, &i_q);
+  if (*calibration_active != 0U) {
+    /* 标定时固定电角度0°、Ud为给定值、Uq为0，不运行电流PI。 */
+    *u_d = *calibration_ud;
+    *u_q = 0.0f;
+  } else {
+    *u_d = PID_Update(id_pid, *id_given - *i_d, current_time);
+    *u_q = PID_Update(iq_pid, *iq_given - *i_q, current_time);
+  }
 
-  u_d = PID_Update(&id_pid_inst, (id_given_sp-i_d),current_time);
-  u_q = PID_Update(&iq_pid_inst,(iq_given_sp-i_q),current_time);
-
-  float voltage_limit = g_adc_vbus * EXPERIMENT_VOLTAGE_UTILIZATION;
+  float voltage_limit = *adc_vbus * EXPERIMENT_VOLTAGE_UTILIZATION;
   if (voltage_limit > VOLTAGE_LIMIT) {
     voltage_limit = VOLTAGE_LIMIT;
   }
-
-  const float voltage_magnitude_sq = u_d * u_d + u_q * u_q;
+  const float voltage_magnitude_sq = *u_d * *u_d + *u_q * *u_q;
   if ((voltage_limit > 0.0f) &&
       (voltage_magnitude_sq > voltage_limit * voltage_limit)) {
     const float scale = voltage_limit / sqrtf(voltage_magnitude_sq);
-    u_d *= scale;
-    u_q *= scale;
+    *u_d *= scale;
+    *u_q *= scale;
   }
 
-  ipark_transform(u_d, u_q, theta, &u_alpha, &u_beta);
-
-  svpwm_generate(u_alpha, u_beta, g_adc_vbus, &ccrA, &ccrB, &ccrC);
-
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, ccrA);
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, ccrB);
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, ccrC);
-
+  if (*calibration_active != 0U) {
+    *u_alpha = *u_d;
+    *u_beta = *u_q;
+  } else {
+    *u_alpha = *u_d * theta_cos - *u_q * theta_sin;
+    *u_beta = *u_d * theta_sin + *u_q * theta_cos;
+  }
+  svpwm_generate(*u_alpha, *u_beta, *adc_vbus, ccr_a, ccr_b, ccr_c);
+  __HAL_TIM_SET_COMPARE(timer, TIM_CHANNEL_1, *ccr_a);
+  __HAL_TIM_SET_COMPARE(timer, TIM_CHANNEL_2, *ccr_b);
+  __HAL_TIM_SET_COMPARE(timer, TIM_CHANNEL_3, *ccr_c);
 }
 
-void Control_Loop_test(void) {
-  const float dt = FOC_CURRENT_LOOP_PERIOD_S;
+void Control_Loop_test(FOC_Axis axis)
+{
+  const uint8_t is_fy = (axis == FOC_AXIS_FY) ? 1U : 0U;
+  TIM_HandleTypeDef *timer = is_fy ? &htim8 : &htim1;
+  float *adc_current = is_fy ? g_adc_current_fy : g_adc_current_sp;
+  float *adc_vbus = is_fy ? &g_adc_vbus_fy : &g_adc_vbus_sp;
+  float *current_angle = is_fy ? &current_angle_fy : &current_angle_sp;
+  float *electrical_offset = is_fy
+                                 ? &electrical_offset_deg_fy
+                                 : &electrical_offset_deg_sp;
+  float *theta = is_fy ? &theta_fy : &theta_sp;
+  float *i_alpha = is_fy ? &i_alpha_fy : &i_alpha_sp;
+  float *i_beta = is_fy ? &i_beta_fy : &i_beta_sp;
+  float *i_d = is_fy ? &i_d_fy : &i_d_sp;
+  float *i_q = is_fy ? &i_q_fy : &i_q_sp;
+  float *u_alpha = is_fy ? &u_alpha_fy : &u_alpha_sp;
+  float *u_beta = is_fy ? &u_beta_fy : &u_beta_sp;
+  float *open_loop_theta = is_fy
+                               ? &open_loop_theta_fy
+                               : &open_loop_theta_sp;
+  float *open_loop_speed = is_fy
+                               ? &open_loop_speed_fy
+                               : &open_loop_speed_sp;
+  float *open_loop_voltage = is_fy
+                                 ? &open_loop_voltage_fy
+                                 : &open_loop_voltage_sp;
+  uint32_t *ccr_a = is_fy ? &ccrA_fy : &ccrA_sp;
+  uint32_t *ccr_b = is_fy ? &ccrB_fy : &ccrB_sp;
+  uint32_t *ccr_c = is_fy ? &ccrC_fy : &ccrC_sp;
 
-  ssi_process();
-  Get_Electrical_Angle(&theta,&current_angle_sp);
-  // 2. 让电角度自增
-  open_loop_theta += open_loop_speed * dt;
+  ssi_process_axis(axis);
+  Get_Electrical_Angle(theta, current_angle, *electrical_offset);
+  *open_loop_theta += *open_loop_speed * FOC_CURRENT_LOOP_PERIOD_S;
+  if (*open_loop_theta > 2.0f * PI) {
+    *open_loop_theta -= 2.0f * PI;
+  }
+  if (*open_loop_theta < 0.0f) {
+    *open_loop_theta += 2.0f * PI;
+  }
 
-  // 3. 角度归一化 [0, 2π]
-  if (open_loop_theta > 2.0f * PI) open_loop_theta -= 2.0f * PI;
-  if (open_loop_theta < 0.0f)      open_loop_theta += 2.0f * PI;
-
-
-  float i_a = -g_adc_current[0];
-  float i_b = -g_adc_current[1];
-  float i_c = -g_adc_current[2];
-
-
-  clarke_transform(i_a, i_b, i_c, &i_alpha, &i_beta);
-  park_transform(i_alpha, i_beta, theta, &i_d, &i_q);
-  // 4. 设置固定开环电压，此时Ud=V、Uq=0。
-  // 这样磁场会拉着转子同步旋转
-  float u_d_test = open_loop_voltage;
-  float u_q_test = 0.0f;
-
-  // 5. 坐标变换，此处传入自增的开环角度。
-  ipark_transform(u_d_test, u_q_test, open_loop_theta, &u_alpha, &u_beta);
-
-  // 6. 输出到空间矢量脉宽调制模块。
-  svpwm_generate(u_alpha, u_beta, g_adc_vbus, &ccrA, &ccrB, &ccrC);
-
-  // 7. 更新硬件占空比
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, ccrA);
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, ccrB);
-  __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, ccrC);
+  clarke_transform(-adc_current[0], -adc_current[1], -adc_current[2],
+                   i_alpha, i_beta);
+  park_transform(*i_alpha, *i_beta, *theta, i_d, i_q);
+  ipark_transform(*open_loop_voltage, 0.0f, *open_loop_theta,
+                  u_alpha, u_beta);
+  svpwm_generate(*u_alpha, *u_beta, *adc_vbus, ccr_a, ccr_b, ccr_c);
+  __HAL_TIM_SET_COMPARE(timer, TIM_CHANNEL_1, *ccr_a);
+  __HAL_TIM_SET_COMPARE(timer, TIM_CHANNEL_2, *ccr_b);
+  __HAL_TIM_SET_COMPARE(timer, TIM_CHANNEL_3, *ccr_c);
 }
 
-void Motor_Enable(void) {
-  uint32_t primask = __get_PRIMASK();
-  __disable_irq();
+static uint8_t start_power_stage(FOC_Axis axis)
+{
+  volatile FOC_PowerState *power_state = (axis == FOC_AXIS_FY)
+                                               ? &foc_power_state_fy
+                                               : &foc_power_state_sp;
+  volatile FOC_FaultCode *fault = (axis == FOC_AXIS_FY)
+                                      ? &foc_fault_code_fy
+                                      : &foc_fault_code_sp;
+  volatile uint8_t *target_valid = (axis == FOC_AXIS_FY)
+                                       ? &foc_position_target_valid_fy
+                                       : &foc_position_target_valid_sp;
+  uint32_t *enable_sample_count = (axis == FOC_AXIS_FY)
+                                      ? &enable_sample_count_fy
+                                      : &enable_sample_count_sp;
+  uint32_t *enable_start_tick_ms = (axis == FOC_AXIS_FY)
+                                       ? &enable_start_tick_ms_fy
+                                       : &enable_start_tick_ms_sp;
+  TIM_HandleTypeDef *timer = (axis == FOC_AXIS_FY) ? &htim8 : &htim1;
+  const uint8_t adc_calibrated = (axis == FOC_AXIS_FY)
+                                     ? g_adc_calibrated_fy
+                                     : g_adc_calibrated_sp;
 
-  if (foc_power_state == FOC_POWER_ENABLED ||
-      foc_power_state == FOC_POWER_WAIT_ENCODER) {
-    restore_interrupt_state(primask);
-    return;
+  if ((*power_state != FOC_POWER_DISABLED) || (adc_calibrated == 0U)) {
+    return 0U;
   }
 
-  if (g_adc_calibrated == 0U) {
-    restore_interrupt_state(primask);
-    return;
+  reset_control_state(axis);
+  adc_reset_axis(axis);
+  set_pwm_neutral(axis);
+  *target_valid = 0U;
+  *fault = FOC_FAULT_NONE;
+  ssi_rearm_axis(axis);
+  *enable_sample_count = ssi_valid_sample_count(axis);
+  *enable_start_tick_ms = HAL_GetTick();
+  *power_state = FOC_POWER_WAIT_ENCODER;
+
+  /* 第二轴启动时只错开载波，不增加额外的轴间互锁。 */
+  if (((axis == FOC_AXIS_SP) &&
+       (foc_power_state_fy != FOC_POWER_DISABLED)) ||
+      ((axis == FOC_AXIS_FY) &&
+       (foc_power_state_sp != FOC_POWER_DISABLED))) {
+    __HAL_TIM_SET_COUNTER(timer, timer->Init.Period / 2U);
+  } else {
+    __HAL_TIM_SET_COUNTER(timer, 0U);
   }
 
-  /* 功率级保持关闭，先启动控制时基并获取编码器数据。 */
-  HAL_GPIO_WritePin(SHUTDOWN_GPIO_Port, SHUTDOWN_Pin, GPIO_PIN_RESET);
-  reset_control_state();
-  ADC_ResetCurrentProcessing();
-  set_pwm_neutral();
-  foc_position_target_valid = 0U;
-  foc_fault_code = FOC_FAULT_NONE;
-  SSI_RearmValidation();
-  enable_sample_count = SSI_GetValidSampleCount();
-  enable_start_tick_ms = HAL_GetTick();
-  foc_power_state = FOC_POWER_WAIT_ENCODER;
   HAL_StatusTypeDef pwm_status = HAL_OK;
-  if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1) != HAL_OK) pwm_status = HAL_ERROR;
-  if (HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1) != HAL_OK) pwm_status = HAL_ERROR;
-  if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2) != HAL_OK) pwm_status = HAL_ERROR;
-  if (HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2) != HAL_OK) pwm_status = HAL_ERROR;
-  if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3) != HAL_OK) pwm_status = HAL_ERROR;
-  if (HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_3) != HAL_OK) pwm_status = HAL_ERROR;
+  if (HAL_TIM_PWM_Start(timer, TIM_CHANNEL_1) != HAL_OK) pwm_status = HAL_ERROR;
+  if (HAL_TIMEx_PWMN_Start(timer, TIM_CHANNEL_1) != HAL_OK) pwm_status = HAL_ERROR;
+  if (HAL_TIM_PWM_Start(timer, TIM_CHANNEL_2) != HAL_OK) pwm_status = HAL_ERROR;
+  if (HAL_TIMEx_PWMN_Start(timer, TIM_CHANNEL_2) != HAL_OK) pwm_status = HAL_ERROR;
+  if (HAL_TIM_PWM_Start(timer, TIM_CHANNEL_3) != HAL_OK) pwm_status = HAL_ERROR;
+  if (HAL_TIMEx_PWMN_Start(timer, TIM_CHANNEL_3) != HAL_OK) pwm_status = HAL_ERROR;
 
   if (pwm_status != HAL_OK) {
-    stop_power_stage(FOC_FAULT_PWM_START_FAILED);
+    stop_power_stage(axis, FOC_FAULT_PWM_START_FAILED);
+    return 0U;
+  }
+  return 1U;
+}
+
+void Motor_Enable(FOC_Axis axis)
+{
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  if (axis == FOC_AXIS_FY) {
+    electrical_calibration_active_fy = 0U;
+    electrical_calibration_ud_fy = 0.0f;
+  } else {
+    electrical_calibration_active_sp = 0U;
+    electrical_calibration_ud_sp = 0.0f;
+  }
+  (void)start_power_stage(axis);
+  restore_interrupt_state(primask);
+}
+
+void Motor_Disable(FOC_Axis axis)
+{
+  const uint32_t primask = __get_PRIMASK();
+  __disable_irq();
+  stop_power_stage(axis, FOC_FAULT_NONE);
+  restore_interrupt_state(primask);
+}
+
+uint8_t FOC_StartElectricalCalibration(FOC_Axis axis, float ud_voltage_v)
+{
+  if (!isfinite(ud_voltage_v) || (ud_voltage_v <= 0.0f)) {
+    return 0U;
   }
 
-  restore_interrupt_state(primask);
-}
-
-void Motor_Disable(void) {
-  uint32_t primask = __get_PRIMASK();
+  Motor_Disable(axis);
+  const uint32_t primask = __get_PRIMASK();
   __disable_irq();
-
-  stop_power_stage(FOC_FAULT_NONE);
-
+  if (axis == FOC_AXIS_FY) {
+    electrical_calibration_active_fy = 1U;
+    electrical_calibration_ud_fy = ud_voltage_v;
+  } else {
+    electrical_calibration_active_sp = 1U;
+    electrical_calibration_ud_sp = ud_voltage_v;
+  }
+  const uint8_t started = start_power_stage(axis);
+  if (started == 0U) {
+    if (axis == FOC_AXIS_FY) {
+      electrical_calibration_active_fy = 0U;
+      electrical_calibration_ud_fy = 0.0f;
+    } else {
+      electrical_calibration_active_sp = 0U;
+      electrical_calibration_ud_sp = 0.0f;
+    }
+  }
   restore_interrupt_state(primask);
+  return started;
 }
 
-uint8_t FOC_GetPowerState(void)
+void FOC_StopElectricalCalibration(FOC_Axis axis)
 {
-  return (uint8_t)foc_power_state;
+  Motor_Disable(axis);
 }
 
-FOC_FaultCode FOC_GetFaultCode(void)
+uint8_t FOC_SetElectricalOffset(FOC_Axis axis, float offset_deg)
 {
-  return foc_fault_code;
+  if (!isfinite(offset_deg)) {
+    return 0U;
+  }
+  float offset = fmodf(offset_deg, 360.0f);
+  if (offset < 0.0f) {
+    offset += 360.0f;
+  }
+  if (axis == FOC_AXIS_FY) {
+    electrical_offset_deg_fy = offset;
+  } else {
+    electrical_offset_deg_sp = offset;
+  }
+  return 1U;
+}
+
+uint8_t FOC_CaptureElectricalOffset(FOC_Axis axis)
+{
+  const float offset = (axis == FOC_AXIS_FY)
+                           ? current_angle_fy
+                           : current_angle_sp;
+  Motor_Disable(axis);
+  return FOC_SetElectricalOffset(axis, offset);
+}
+
+FOC_ControlMode FOC_GetControlMode(FOC_Axis axis)
+{
+  return (axis == FOC_AXIS_FY) ? foc_control_mode_fy : foc_control_mode_sp;
+}
+
+float FOC_GetSpeedTarget(FOC_Axis axis)
+{
+  return (axis == FOC_AXIS_FY) ? speed_given_fy : speed_given_sp;
+}
+
+float FOC_GetIdTarget(FOC_Axis axis)
+{
+  return (axis == FOC_AXIS_FY) ? id_given_fy : id_given_sp;
+}
+
+float FOC_GetIqTarget(FOC_Axis axis)
+{
+  return (axis == FOC_AXIS_FY) ? iq_given_fy : iq_given_sp;
+}
+
+float FOC_GetElectricalOffset(FOC_Axis axis)
+{
+  return (axis == FOC_AXIS_FY)
+             ? electrical_offset_deg_fy
+             : electrical_offset_deg_sp;
+}
+
+float FOC_GetElectricalCalibrationUd(FOC_Axis axis)
+{
+  return (axis == FOC_AXIS_FY)
+             ? electrical_calibration_ud_fy
+             : electrical_calibration_ud_sp;
+}
+
+uint8_t FOC_IsElectricalCalibrationActive(FOC_Axis axis)
+{
+  return (axis == FOC_AXIS_FY)
+             ? electrical_calibration_active_fy
+             : electrical_calibration_active_sp;
+}
+
+uint8_t FOC_IsPositionTargetValid(FOC_Axis axis)
+{
+  if (axis == FOC_AXIS_FY) {
+    return (foc_position_target_valid_fy &&
+            (foc_control_mode_fy == FOC_CONTROL_MODE_POSITION)) ? 1U : 0U;
+  }
+  return (foc_position_target_valid_sp &&
+          (foc_control_mode_sp == FOC_CONTROL_MODE_POSITION)) ? 1U : 0U;
+}
+
+uint8_t FOC_GetPowerState(FOC_Axis axis)
+{
+  return (uint8_t)((axis == FOC_AXIS_FY)
+                       ? foc_power_state_fy
+                       : foc_power_state_sp);
+}
+
+FOC_FaultCode FOC_GetFaultCode(FOC_Axis axis)
+{
+  return (axis == FOC_AXIS_FY) ? foc_fault_code_fy : foc_fault_code_sp;
 }

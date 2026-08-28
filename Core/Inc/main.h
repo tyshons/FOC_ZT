@@ -57,8 +57,6 @@ void Error_Handler(void);
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
-#define SHUTDOWN_Pin GPIO_PIN_13
-#define SHUTDOWN_GPIO_Port GPIOC
 #define ADC_Temp_Pin GPIO_PIN_0
 #define ADC_Temp_GPIO_Port GPIOC
 #define ADC_U_Pin GPIO_PIN_1
@@ -69,18 +67,40 @@ void Error_Handler(void);
 #define ADC_W_GPIO_Port GPIOC
 #define ADC_VBUS_Pin GPIO_PIN_3
 #define ADC_VBUS_GPIO_Port GPIOA
+#define ADC_VBUS_FY_Pin GPIO_PIN_1
+#define ADC_VBUS_FY_GPIO_Port GPIOB
+#define ADC_U_FY_Pin GPIO_PIN_7
+#define ADC_U_FY_GPIO_Port GPIOE
+#define ADC_V_FY_Pin GPIO_PIN_8
+#define ADC_V_FY_GPIO_Port GPIOE
+#define ADC_Temp_FY_Pin GPIO_PIN_9
+#define ADC_Temp_FY_GPIO_Port GPIOE
+#define ADC_W_FY_Pin GPIO_PIN_10
+#define ADC_W_FY_GPIO_Port GPIOE
 #define PM1_PWM_UL_Pin GPIO_PIN_13
 #define PM1_PWM_UL_GPIO_Port GPIOB
 #define PM1_PWM_VL_Pin GPIO_PIN_14
 #define PM1_PWM_VL_GPIO_Port GPIOB
 #define PM1_PWM_WL_Pin GPIO_PIN_15
 #define PM1_PWM_WL_GPIO_Port GPIOB
+#define PM2_PWM_UH_Pin GPIO_PIN_6
+#define PM2_PWM_UH_GPIO_Port GPIOC
+#define PM2_PWM_VH_Pin GPIO_PIN_7
+#define PM2_PWM_VH_GPIO_Port GPIOC
+#define PM2_PWM_WH_Pin GPIO_PIN_8
+#define PM2_PWM_WH_GPIO_Port GPIOC
 #define PM1_PWM_UH_Pin GPIO_PIN_8
 #define PM1_PWM_UH_GPIO_Port GPIOA
-#define PM__PWM_VH_Pin GPIO_PIN_9
-#define PM__PWM_VH_GPIO_Port GPIOA
+#define PM1_PWM_VH_Pin GPIO_PIN_9
+#define PM1_PWM_VH_GPIO_Port GPIOA
 #define PM1_PWM_WH_Pin GPIO_PIN_10
 #define PM1_PWM_WH_GPIO_Port GPIOA
+#define PM2_PWM_UL_Pin GPIO_PIN_10
+#define PM2_PWM_UL_GPIO_Port GPIOC
+#define PM2_PWM_VL_Pin GPIO_PIN_11
+#define PM2_PWM_VL_GPIO_Port GPIOC
+#define PM2_PWM_WL_Pin GPIO_PIN_12
+#define PM2_PWM_WL_GPIO_Port GPIOC
 #define LED1_Pin GPIO_PIN_0
 #define LED1_GPIO_Port GPIOE
 #define LED0_Pin GPIO_PIN_1

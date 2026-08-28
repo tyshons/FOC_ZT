@@ -4,7 +4,7 @@
 
 #include "PID_Control.h"
 
-PID_TypeDef position_pid_inst = {
+PID_TypeDef position_pid_inst_sp = {
   .Kp = 0.25f,
   .Ki = 0.0f,
   .Kd = 0.0f,
@@ -12,7 +12,15 @@ PID_TypeDef position_pid_inst = {
   .output_max = 800.0f,
   .integral_limit = 100.0f,
   .low_pass_filter_time_constant = 0.01f};
-PID_TypeDef speed_pid_inst = {
+PID_TypeDef position_pid_inst_fy = {
+  .Kp = 0.25f,
+  .Ki = 0.0f,
+  .Kd = 0.0f,
+  .output_min = -800.0f,
+  .output_max = 800.0f,
+  .integral_limit = 100.0f,
+  .low_pass_filter_time_constant = 0.01f};
+PID_TypeDef speed_pid_inst_sp = {
   .Kp = 1.0f,
   .Ki = 0.7f,
   .Kd = 0.0f,
@@ -20,7 +28,15 @@ PID_TypeDef speed_pid_inst = {
   .output_max = 10.0f,
   .integral_limit = 18.0f,
   .low_pass_filter_time_constant = 0.005f};
-PID_TypeDef id_pid_inst = {
+PID_TypeDef speed_pid_inst_fy = {
+  .Kp = 0.3f,
+  .Ki = 0.5f,
+  .Kd = 0.0f,
+  .output_min = -10.0f,
+  .output_max = 10.0f,
+  .integral_limit = 18.0f,
+  .low_pass_filter_time_constant = 0.005f};
+PID_TypeDef id_pid_inst_sp = {
   .Kp = 1.0f,
   .Ki = 35.0f,
   .Kd = 0.0f,
@@ -28,7 +44,23 @@ PID_TypeDef id_pid_inst = {
   .output_max = 30.0f,
   .integral_limit = 25.0f,
   .low_pass_filter_time_constant = 0.001f};
-PID_TypeDef iq_pid_inst = {
+PID_TypeDef id_pid_inst_fy = {
+  .Kp = 1.0f,
+  .Ki = 35.0f,
+  .Kd = 0.0f,
+  .output_min = -30.0f,
+  .output_max = 30.0f,
+  .integral_limit = 25.0f,
+  .low_pass_filter_time_constant = 0.001f};
+PID_TypeDef iq_pid_inst_sp = {
+  .Kp = 1.0f,
+  .Ki = 35.0f,
+  .Kd = 0.0f,
+  .output_min = -30.0f,
+  .output_max = 30.0f,
+  .integral_limit = 25.0f,
+  .low_pass_filter_time_constant = 0.001f};
+PID_TypeDef iq_pid_inst_fy = {
   .Kp = 1.0f,
   .Ki = 35.0f,
   .Kd = 0.0f,
@@ -38,20 +70,17 @@ PID_TypeDef iq_pid_inst = {
   .low_pass_filter_time_constant = 0.001f};
 
 void Control_Loop_Init(void) {
-  // 初始化位置环 PID
-  PID_Init(&position_pid_inst);
-  PID_Reset(&position_pid_inst);
-
-  // 初始化速度环 PID
-  PID_Init(&speed_pid_inst);
-  PID_Reset(&speed_pid_inst);
-
-  // 初始化电流环 PID
-  PID_Init(&id_pid_inst);
-  PID_Reset(&id_pid_inst);
-
-  PID_Init(&iq_pid_inst);
-  PID_Reset(&iq_pid_inst);
+  PID_TypeDef *const pid_instances[] = {
+      &position_pid_inst_sp, &position_pid_inst_fy,
+      &speed_pid_inst_sp, &speed_pid_inst_fy,
+      &id_pid_inst_sp, &id_pid_inst_fy,
+      &iq_pid_inst_sp, &iq_pid_inst_fy,
+  };
+  for (uint32_t index = 0U;
+       index < (sizeof(pid_instances) / sizeof(pid_instances[0]));
+       index++) {
+    PID_Init(pid_instances[index]);
+  }
 }
 
 void PID_Init(PID_TypeDef* pid)

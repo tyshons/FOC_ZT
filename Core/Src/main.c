@@ -98,14 +98,19 @@ int main(void)
   MX_DMA_Init();
   MX_TIM1_Init();
   MX_ADC1_Init();
+  MX_USART3_UART_Init();
   MX_SPI1_Init();
   MX_USART1_UART_Init();
+  MX_SPI4_Init();
+  MX_TIM8_Init();
+  MX_ADC3_Init();
   /* USER CODE BEGIN 2 */
   Control_Loop_Init();
   Experiment_Control_Init();
   adc_foc_init();
-  /* 上电时保持功率级关闭，必须由上位机显式发送方位轴使能命令。 */
-  Motor_Disable();
+  /* 上电时两轴都保持关闭，必须由上位机分别显式使能。 */
+  Motor_Disable(FOC_AXIS_SP);
+  Motor_Disable(FOC_AXIS_FY);
   Turntable_Comm_Init();
   /* USER CODE END 2 */
 

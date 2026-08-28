@@ -35,10 +35,14 @@ typedef struct {
   bool anti_windup_enabled;
 } PID_TypeDef;
 
-extern PID_TypeDef position_pid_inst;
-extern PID_TypeDef speed_pid_inst;
-extern PID_TypeDef id_pid_inst;
-extern PID_TypeDef iq_pid_inst;
+extern PID_TypeDef position_pid_inst_sp;
+extern PID_TypeDef position_pid_inst_fy;
+extern PID_TypeDef speed_pid_inst_sp;
+extern PID_TypeDef speed_pid_inst_fy;
+extern PID_TypeDef id_pid_inst_sp;
+extern PID_TypeDef id_pid_inst_fy;
+extern PID_TypeDef iq_pid_inst_sp;
+extern PID_TypeDef iq_pid_inst_fy;
 
 // 初始化函数
 void Control_Loop_Init(void);

@@ -2,6 +2,49 @@
 
 本文档记录本次为转台下位机接入上位机通信所做的代码修改、已完成功能、协议符合性，以及目前仍存在的问题。
 
+## 2026-08-25 双轴实现（当前版本）
+
+本节覆盖文档后面保留的早期“仅方位轴接入”记录。当前协议轴号为：
+
+- `axis=0x00`：水平/方位轴（变量后缀 `_sp`）。
+- `axis=0x01`：俯仰轴（变量后缀 `_fy`）。
+
+两轴都支持独立开关机、位置/速度目标、四环 PID、SSI 编码器校验、FOC
+遥测和故障保护。实验扩展仍只作用于水平轴。
+
+- 双轴位置命令：`A5 5A 02 01 + az(float) + fy(float) + checksum + 0D 0A`，共15字节。
+- 单轴位置命令：`A5 5A 02 01 + axis + target(float) + checksum + 0D 0A`，共12字节。
+- 单轴速度命令：`A5 5A 02 02 + axis + rpm(float) + checksum + 0D 0A`，共12字节。
+- 目标回报 `05 14` 的有效字节改为位图：位0对应水平轴，位1对应俯仰轴。
+- 周期扩展遥测 `05 12` 共33字节，依次包含双轴速度、双轴 Iq/Id和双轴功率状态。
+- 按轴三相电流查询：`A5 5A 05 19 axis checksum 0D 0A`，回报21字节，包含轴号、ADC校准状态和该轴 `g_adc_current` 的U/V/W三个float值。重采所选轴电流零点使用 `A5 5A 05 19 axis 01 checksum 0D 0A`；下位机会先停该轴，等待20 ms后重新采样并回报结果。
+- 健康状态 `05 18` 共57字节，包含双轴故障码及两套 SSI 统计，后接公共串口统计。
+- PID 设置/查询中的 `axis` 已真正选择 `_sp` 或 `_fy` PID 实例。
+
+上位机已同步支持双轴角度、速度轴选择、PID 轴选择、开关机、状态同步、
+曲线和健康状态解析。
+
+### 双轴电角度标定扩展
+
+标定扩展使用 `mode=0x05`：
+
+- 状态查询：`A5 5A 05 20 checksum 0D 0A`，共7字节。
+- 控制命令：`A5 5A 05 20 action axis value(float) checksum 0D 0A`，共13字节。
+- 状态回报：`A5 5A 05 21 ... checksum 0D 0A`，共37字节。
+
+`action` 定义：
+
+- `0x01`：所选轴自动停机并重新启动，固定电角度为0，`value` 直接作为正 Id 给定，Iq固定为0。
+- `0x02`：采集当前机械角度为所选轴运行时偏置，并立即停机。
+- `0x03`：停止所选轴标定并停机。
+- `0x04`：手动应用 `value` 指定的运行时偏置。
+
+37字节回报只包含标定活动位图、最后动作及接受状态、SP/FY机械角度、
+SP/FY运行时偏置、SP/FY Id给定和两轴功率状态。两轴没有标定互锁，
+也不要求上位机周期保活。运行时偏置位于RAM，复位后恢复固件默认值。
+永久默认值分别由 `MOTOR_ELECTRICAL_OFFSET_DEG_SP_DEFAULT` 和
+`MOTOR_ELECTRICAL_OFFSET_DEG_FY_DEFAULT` 配置。
+
 ## 1. 依据
 
 参考协议文件：
@@ -446,16 +489,16 @@ python -m py_compile turntable_control.py
 - 电流零点使用4096组样本做浮点平均，避免整数截断造成亚计数偏差。
 - 当前Q轴参考电流限制为±2.0 A；该限制同时参与速度PID外层抗积分饱和。
 
-新增只查询不周期发送的ADC诊断帧：
+当前版本已将该帧精简为按轴查询三相处理电流：
 
 ```text
-查询：A5 5A 05 19 1E 0D 0A
-回报：A5 5A 05 19 flags offset_u offset_v offset_w
-      endpoint_delta_u endpoint_delta_v endpoint_delta_w
-      adc_sequence_count foc_update_count checksum 0D 0A
+查询：A5 5A 05 19 axis checksum 0D 0A
+回报：A5 5A 05 19 axis calibrated current_u current_v current_w
+      checksum 0D 0A
 ```
 
-回报帧共40字节，浮点数与32位计数均为小端格式。`flags`位0表示零点校准有效，位1表示当前已收到第一端点、正在等待第二端点。
+回报帧共21字节，三个电流为小端float，直接对应所选轴的
+`g_adc_current[0..2]`。`calibrated`为1表示该轴ADC零点校准成功。
 
 ## 12. 2026-08-01 机械堵转诊断与限幅跟踪
 

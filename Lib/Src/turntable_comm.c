@@ -2,6 +2,7 @@
 
 #include "FOC_Control.h"
 #include "PID_Control.h"
+#include "adc.h"
 #include "Experiment_Config.h"
 #include "Experiment_Control.h"
 #include "Experiment_ESO.h"
@@ -51,27 +52,30 @@
 #define TT_EXT_LFF_REPORT 0x1DU
 #define TT_EXT_LFF_ORDER_REPORT 0x1EU
 #define TT_EXT_LFF_TABLE_REPORT 0x1FU
+#define TT_EXT_ELECTRICAL_CALIBRATION 0x20U
+#define TT_EXT_ELECTRICAL_CALIBRATION_REPORT 0x21U
 
-#define TT_AXIS_AZ      0x00U
+#define TT_CAL_ACTION_START 0x01U
+#define TT_CAL_ACTION_CAPTURE 0x02U
+#define TT_CAL_ACTION_STOP 0x03U
+#define TT_CAL_ACTION_SET_OFFSET 0x04U
+#define TT_ADC_ACTION_CALIBRATE_OFFSET 0x01U
+
+#define TT_AXIS_SP      0x00U
+#define TT_AXIS_FY      0x01U
 #define TT_UART_HANDLE  huart1
 #define TT_UART_INSTANCE USART1
 
-extern float current_angle_sp;
-/* FOC运行时只读测量量，不改变控制层和驱动层。 */
-extern float current_speed_sp;
-extern float position_given_sp;
-extern float i_d;
-extern float i_q;
-
 static void send_telemetry_frame(void);
 static void send_health_report(void);
-static void send_adc_diagnostic_report(void);
-static void send_speed_report(uint8_t accepted);
+static void send_adc_diagnostic_report(uint8_t axis);
+static void send_speed_report(uint8_t axis, uint8_t accepted);
 static void send_sweep_result_report(uint8_t order);
 static void send_eso_report(void);
 static void send_lff_report(void);
 static void send_lff_order_report(uint8_t order);
 static void send_lff_table_report(uint16_t start_bin);
+static void send_electrical_calibration_report(void);
 
 typedef enum {
   TT_RX_WAIT_HEAD0 = 0,
@@ -111,6 +115,9 @@ volatile uint32_t tt_rx_invalid_frame_count;
 static TT_FeatureState tt_servo_features;
 static TT_FeatureState tt_tracking_features;
 static volatile uint8_t tt_eso_config_accepted = 1U;
+static volatile uint8_t tt_calibration_last_action;
+static volatile uint8_t tt_calibration_last_axis = 0xFFU;
+static volatile uint8_t tt_calibration_last_accepted = 1U;
 
 uint8_t Turntable_Comm_IsEnabled(void)
 {
@@ -182,17 +189,31 @@ static void write_le_u32(uint8_t *p, uint32_t value)
   p[3] = (uint8_t)((value >> 24) & 0xFFU);
 }
 
-static PID_TypeDef *pid_from_loop(uint8_t loop)
+static uint8_t axis_is_valid(uint8_t axis)
 {
+  return ((axis == TT_AXIS_SP) || (axis == TT_AXIS_FY)) ? 1U : 0U;
+}
+
+static FOC_Axis foc_axis_from_protocol(uint8_t axis)
+{
+  return (axis == TT_AXIS_FY) ? FOC_AXIS_FY : FOC_AXIS_SP;
+}
+
+static PID_TypeDef *pid_from_axis_loop(uint8_t axis, uint8_t loop)
+{
+  if (axis_is_valid(axis) == 0U) {
+    return NULL;
+  }
+  const uint8_t is_fy = (axis == TT_AXIS_FY) ? 1U : 0U;
   switch (loop) {
     case 0x00U:
-      return &iq_pid_inst;
+      return is_fy ? &iq_pid_inst_fy : &iq_pid_inst_sp;
     case 0x03U:
-      return &id_pid_inst;
+      return is_fy ? &id_pid_inst_fy : &id_pid_inst_sp;
     case 0x01U:
-      return &speed_pid_inst;
+      return is_fy ? &speed_pid_inst_fy : &speed_pid_inst_sp;
     case 0x02U:
-      return &position_pid_inst;
+      return is_fy ? &position_pid_inst_fy : &position_pid_inst_sp;
     default:
       return NULL;
   }
@@ -200,18 +221,18 @@ static PID_TypeDef *pid_from_loop(uint8_t loop)
 
 static void apply_axis_angle(uint8_t axis, float target_deg)
 {
-  if ((axis == TT_AXIS_AZ) && isfinite(target_deg)) {
-    FOC_SetPositionTarget(target_deg);
+  if ((axis_is_valid(axis) != 0U) && isfinite(target_deg)) {
+    FOC_SetPositionTarget(foc_axis_from_protocol(axis), target_deg);
   }
 }
 
 static void apply_pid(uint8_t axis, uint8_t loop, float kp, float ki, float kd)
 {
-  if ((axis != TT_AXIS_AZ) ||
+  if ((axis_is_valid(axis) == 0U) ||
       !isfinite(kp) || !isfinite(ki) || !isfinite(kd)) {
     return;
   }
-  PID_TypeDef *pid = pid_from_loop(loop);
+  PID_TypeDef *pid = pid_from_axis_loop(axis, loop);
   if (pid == NULL) {
     return;
   }
@@ -266,22 +287,25 @@ static void handle_servo_frame(const uint8_t *frame, uint8_t len)
   } else if (func == TT_FUNC_ANGLE) {
     if (len == 15U) {
       float az_target = read_le_float(&frame[4]);
-      apply_axis_angle(TT_AXIS_AZ, az_target);
+      float fy_target = read_le_float(&frame[8]);
+      apply_axis_angle(TT_AXIS_SP, az_target);
+      apply_axis_angle(TT_AXIS_FY, fy_target);
     } else if (len == 12U) {
       uint8_t axis = frame[4];
       float target = read_le_float(&frame[5]);
       apply_axis_angle(axis, target);
     }
   } else if (func == TT_FUNC_SPEED) {
-    if (len == 12U && frame[4] == TT_AXIS_AZ) {
+    if (len == 12U && axis_is_valid(frame[4]) != 0U) {
+      const uint8_t axis = frame[4];
       float requested_rpm = read_le_float(&frame[5]);
       uint8_t accepted = 0U;
 
       if (isfinite(requested_rpm)) {
-        FOC_SetSpeedTarget(requested_rpm);
+        FOC_SetSpeedTarget(foc_axis_from_protocol(axis), requested_rpm);
         accepted = 1U;
       }
-      send_speed_report(accepted);
+      send_speed_report(axis, accepted);
     }
   } else if ((func >= 0x03U && func <= 0x05U) && len == 8U) {
     apply_feature(&tt_servo_features, func, frame[4]);
@@ -309,8 +333,8 @@ static void handle_tracking_frame(const uint8_t *frame, uint8_t len)
 
 static void send_pid_report(uint8_t pid_mode, uint8_t axis, uint8_t loop)
 {
-  PID_TypeDef *pid = pid_from_loop(loop);
-  if ((axis != TT_AXIS_AZ) || (pid == NULL) || tt_tx_busy) {
+  PID_TypeDef *pid = pid_from_axis_loop(axis, loop);
+  if ((pid == NULL) || tt_tx_busy) {
     return;
   }
 
@@ -335,8 +359,7 @@ static void send_pid_report(uint8_t pid_mode, uint8_t axis, uint8_t loop)
   tt_tx_busy = 0U;
 }
 
-/* 扩展目标回报帧，共16字节：
- * A5 5A 05 14 有效标志 方位目标 俯仰占位值 校验和 0D 0A。 */
+/* 扩展目标回报帧，共16字节：有效位0/1分别对应水平轴/俯仰轴。 */
 static void send_target_report(void)
 {
   if (tt_tx_busy) {
@@ -347,9 +370,11 @@ static void send_target_report(void)
   tt_tx_buf[1] = TT_HEAD1;
   tt_tx_buf[2] = TT_MODE_EXT;
   tt_tx_buf[3] = TT_EXT_TARGET_REPORT;
-  tt_tx_buf[4] = FOC_IsPositionTargetValid();
+  tt_tx_buf[4] =
+      (FOC_IsPositionTargetValid(FOC_AXIS_SP) ? 0x01U : 0x00U) |
+      (FOC_IsPositionTargetValid(FOC_AXIS_FY) ? 0x02U : 0x00U);
   write_le_float(&tt_tx_buf[5], position_given_sp);
-  write_le_float(&tt_tx_buf[9], 0.0f);
+  write_le_float(&tt_tx_buf[9], position_given_fy);
   tt_tx_buf[13] = checksum_sum(tt_tx_buf, 2U, 13U);
   tt_tx_buf[14] = TT_TAIL0;
   tt_tx_buf[15] = TT_TAIL1;
@@ -369,23 +394,26 @@ static void send_target_report(void)
  * 收到结构正确的方位速度命令后立即返回本帧。帧内数据从控制层回读，
  * 上位机可据此区分“数据已写入串口”和“控制器已接受目标”，并判断暂未转动的原因。
  */
-static void send_speed_report(uint8_t accepted)
+static void send_speed_report(uint8_t axis, uint8_t accepted)
 {
-  if (tt_tx_busy) {
+  if (tt_tx_busy || (axis_is_valid(axis) == 0U)) {
     return;
   }
+  const FOC_Axis foc_axis = foc_axis_from_protocol(axis);
+  const float vbus =
+      (foc_axis == FOC_AXIS_FY) ? g_adc_vbus_fy : g_adc_vbus_sp;
 
   tt_tx_buf[0] = TT_HEAD0;
   tt_tx_buf[1] = TT_HEAD1;
   tt_tx_buf[2] = TT_MODE_EXT;
   tt_tx_buf[3] = TT_EXT_SPEED_REPORT;
   tt_tx_buf[4] = accepted;
-  tt_tx_buf[5] = TT_AXIS_AZ;
-  tt_tx_buf[6] = (uint8_t)FOC_GetControlMode();
-  tt_tx_buf[7] = FOC_GetPowerState();
-  write_le_float(&tt_tx_buf[8], FOC_GetSpeedTarget());
-  write_le_float(&tt_tx_buf[12], g_adc_vbus);
-  write_le_float(&tt_tx_buf[16], FOC_GetIqTarget());
+  tt_tx_buf[5] = axis;
+  tt_tx_buf[6] = (uint8_t)FOC_GetControlMode(foc_axis);
+  tt_tx_buf[7] = FOC_GetPowerState(foc_axis);
+  write_le_float(&tt_tx_buf[8], FOC_GetSpeedTarget(foc_axis));
+  write_le_float(&tt_tx_buf[12], vbus);
+  write_le_float(&tt_tx_buf[16], FOC_GetIqTarget(foc_axis));
   tt_tx_buf[20] = checksum_sum(tt_tx_buf, 2U, 20U);
   tt_tx_buf[21] = TT_TAIL0;
   tt_tx_buf[22] = TT_TAIL1;
@@ -939,13 +967,62 @@ static void apply_experiment_config(const uint8_t *frame, uint8_t len)
 
 static void handle_ext_frame(const uint8_t *frame, uint8_t len)
 {
+  if (frame[3] == TT_EXT_ELECTRICAL_CALIBRATION) {
+    if (len == 7U) {
+      send_electrical_calibration_report();
+      return;
+    }
+    if (len == 13U) {
+      const uint8_t action = frame[4];
+      const uint8_t axis = frame[5];
+      const float value = read_le_float(&frame[6]);
+      uint8_t accepted = 0U;
+
+      if ((axis_is_valid(axis) != 0U) && isfinite(value)) {
+        const FOC_Axis foc_axis = foc_axis_from_protocol(axis);
+        if (action == TT_CAL_ACTION_START) {
+          accepted = FOC_StartElectricalCalibration(foc_axis, value);
+        } else if (action == TT_CAL_ACTION_CAPTURE) {
+          accepted = FOC_CaptureElectricalOffset(foc_axis);
+        } else if (action == TT_CAL_ACTION_STOP) {
+          FOC_StopElectricalCalibration(foc_axis);
+          accepted = 1U;
+        } else if (action == TT_CAL_ACTION_SET_OFFSET) {
+          accepted = FOC_SetElectricalOffset(foc_axis, value);
+        }
+      }
+
+      tt_calibration_last_action = action;
+      tt_calibration_last_axis = axis;
+      tt_calibration_last_accepted = accepted;
+      send_electrical_calibration_report();
+    }
+    return;
+  }
+
   if (len == 7U && frame[3] == TT_EXT_TARGET_QUERY) {
     send_target_report();
     return;
   }
 
-  if (len == 7U && frame[3] == TT_EXT_ADC_DIAGNOSTIC_REPORT) {
-    send_adc_diagnostic_report();
+  if (frame[3] == TT_EXT_ADC_DIAGNOSTIC_REPORT) {
+    if ((len == 8U) && (axis_is_valid(frame[4]) != 0U)) {
+      send_adc_diagnostic_report(frame[4]);
+    } else if ((len == 9U) &&
+               (frame[5] == TT_ADC_ACTION_CALIBRATE_OFFSET) &&
+               (axis_is_valid(frame[4]) != 0U)) {
+      const FOC_Axis foc_axis = foc_axis_from_protocol(frame[4]);
+      Motor_Disable(foc_axis);
+      HAL_Delay(20U);
+      if (frame[4] == TT_AXIS_FY) {
+        calibrate_current_offset_fy();
+      } else {
+        calibrate_current_offset_sp();
+      }
+      send_adc_diagnostic_report(frame[4]);
+    } else if (len == 7U) {
+      send_adc_diagnostic_report(TT_AXIS_SP);
+    }
     return;
   }
 
@@ -1016,10 +1093,12 @@ static void handle_frame(const uint8_t *frame, uint8_t len)
   tt_rx_valid_frame_count++;
 
   uint8_t mode = frame[2];
-  if (mode == TT_MODE_DISABLE && len == 7U && frame[3] == TT_AXIS_AZ) {
-    Motor_Disable();
-  } else if (mode == TT_MODE_ENABLE && len == 7U && frame[3] == TT_AXIS_AZ) {
-    Motor_Enable();
+  if ((mode == TT_MODE_DISABLE) && (len == 7U) &&
+      (axis_is_valid(frame[3]) != 0U)) {
+    Motor_Disable(foc_axis_from_protocol(frame[3]));
+  } else if ((mode == TT_MODE_ENABLE) && (len == 7U) &&
+             (axis_is_valid(frame[3]) != 0U)) {
+    Motor_Enable(foc_axis_from_protocol(frame[3]));
   } else if (mode == TT_MODE_SERVO) {
     handle_servo_frame(frame, len);
   } else if (mode == TT_MODE_TRACK) {
@@ -1040,7 +1119,7 @@ static void send_status_frame(void)
   tt_tx_buf[0] = TT_HEAD0;
   tt_tx_buf[1] = TT_HEAD1;
   write_le_float(&tt_tx_buf[2], current_angle_sp);
-  write_le_float(&tt_tx_buf[6], 0.0f);
+  write_le_float(&tt_tx_buf[6], current_angle_fy);
   tt_tx_buf[10] = TT_TAIL0;
   tt_tx_buf[11] = TT_TAIL1;
 
@@ -1061,8 +1140,9 @@ static void send_status_frame(void)
 }
 
 /*
- * 扩展遥测帧，共24字节：
- *   A5 5A 05 12 方位速度 俯仰占位速度 q轴电流 d轴电流 功率状态 校验和 0D 0A
+ * 扩展遥测帧，共33字节：
+ *   A5 5A 05 12 水平/俯仰速度，两轴q/d电流，两轴功率状态，
+ *   校验和，0D 0A。
  *
  * 为兼容现有上位机，前面仍保留12字节位置状态帧。current_speed_sp单位为RPM，
  * 上位机曲线使用度每秒，因此发送前乘以6。功率状态：0为关闭，
@@ -1079,24 +1159,27 @@ static void send_telemetry_frame(void)
   tt_tx_buf[2] = TT_MODE_EXT;
   tt_tx_buf[3] = TT_EXT_TELEMETRY_REPORT;
   write_le_float(&tt_tx_buf[4], current_speed_sp * 6.0f);
-  write_le_float(&tt_tx_buf[8], 0.0f);   /* 当前没有实体俯仰速度通道。 */
-  write_le_float(&tt_tx_buf[12], i_q);   /* 转矩电流，单位：安。 */
-  write_le_float(&tt_tx_buf[16], i_d);   /* 励磁电流，单位：安。 */
-  tt_tx_buf[20] = FOC_GetPowerState();
-  tt_tx_buf[21] = checksum_sum(tt_tx_buf, 2U, 21U);
-  tt_tx_buf[22] = TT_TAIL0;
-  tt_tx_buf[23] = TT_TAIL1;
+  write_le_float(&tt_tx_buf[8], current_speed_fy * 6.0f);
+  write_le_float(&tt_tx_buf[12], i_q_sp);
+  write_le_float(&tt_tx_buf[16], i_d_sp);
+  write_le_float(&tt_tx_buf[20], i_q_fy);
+  write_le_float(&tt_tx_buf[24], i_d_fy);
+  tt_tx_buf[28] = FOC_GetPowerState(FOC_AXIS_SP);
+  tt_tx_buf[29] = FOC_GetPowerState(FOC_AXIS_FY);
+  tt_tx_buf[30] = checksum_sum(tt_tx_buf, 2U, 30U);
+  tt_tx_buf[31] = TT_TAIL0;
+  tt_tx_buf[32] = TT_TAIL1;
 
   tt_tx_busy = 1U;
-  if (HAL_UART_Transmit(&TT_UART_HANDLE, tt_tx_buf, 24U, 5U) != HAL_OK) {
+  if (HAL_UART_Transmit(&TT_UART_HANDLE, tt_tx_buf, 33U, 5U) != HAL_OK) {
     tt_status_tx_error_count++;
   }
   tt_tx_busy = 0U;
 }
 
 /*
- * 控制健康状态帧，共40字节：
- *   A5 5A 05 18 故障码 SSI帧龄 启动错误数 拒绝样本数 SPI错误数
+ * 控制健康状态帧，共57字节：
+ *   A5 5A 05 18 两轴故障码、SSI帧龄、启动错误数、拒绝样本数、SPI错误数，
  *   有效命令帧数 无效命令帧数 丢弃命令帧数 UART错误数 校验和 0D 0A
  */
 static void send_health_report(void)
@@ -1109,58 +1192,101 @@ static void send_health_report(void)
   tt_tx_buf[1] = TT_HEAD1;
   tt_tx_buf[2] = TT_MODE_EXT;
   tt_tx_buf[3] = TT_EXT_HEALTH_REPORT;
-  tt_tx_buf[4] = (uint8_t)FOC_GetFaultCode();
-  write_le_u32(&tt_tx_buf[5], SSI_GetFrameAgeMs());
-  write_le_u32(&tt_tx_buf[9], SSI_GetTransferStartErrorCount());
-  write_le_u32(&tt_tx_buf[13], SSI_GetRejectedSampleCount());
-  write_le_u32(&tt_tx_buf[17], SSI_GetSpiErrorCount());
-  write_le_u32(&tt_tx_buf[21], tt_rx_valid_frame_count);
-  write_le_u32(&tt_tx_buf[25], tt_rx_invalid_frame_count);
-  write_le_u32(&tt_tx_buf[29], tt_rx_dropped_frame_count);
-  write_le_u32(&tt_tx_buf[33], tt_rx_uart_error_count);
-  tt_tx_buf[37] = checksum_sum(tt_tx_buf, 2U, 37U);
-  tt_tx_buf[38] = TT_TAIL0;
-  tt_tx_buf[39] = TT_TAIL1;
+  tt_tx_buf[4] = (uint8_t)FOC_GetFaultCode(FOC_AXIS_SP);
+  tt_tx_buf[5] = (uint8_t)FOC_GetFaultCode(FOC_AXIS_FY);
+  write_le_u32(&tt_tx_buf[6], SSI_GetFrameAgeMs_sp());
+  write_le_u32(&tt_tx_buf[10], SSI_GetFrameAgeMs_fy());
+  write_le_u32(&tt_tx_buf[14], SSI_GetTransferStartErrorCount_sp());
+  write_le_u32(&tt_tx_buf[18], SSI_GetTransferStartErrorCount_fy());
+  write_le_u32(&tt_tx_buf[22], SSI_GetRejectedSampleCount_sp());
+  write_le_u32(&tt_tx_buf[26], SSI_GetRejectedSampleCount_fy());
+  write_le_u32(&tt_tx_buf[30], SSI_GetSpiErrorCount_sp());
+  write_le_u32(&tt_tx_buf[34], SSI_GetSpiErrorCount_fy());
+  write_le_u32(&tt_tx_buf[38], tt_rx_valid_frame_count);
+  write_le_u32(&tt_tx_buf[42], tt_rx_invalid_frame_count);
+  write_le_u32(&tt_tx_buf[46], tt_rx_dropped_frame_count);
+  write_le_u32(&tt_tx_buf[50], tt_rx_uart_error_count);
+  tt_tx_buf[54] = checksum_sum(tt_tx_buf, 2U, 54U);
+  tt_tx_buf[55] = TT_TAIL0;
+  tt_tx_buf[56] = TT_TAIL1;
 
   tt_tx_busy = 1U;
-  if (HAL_UART_Transmit(&TT_UART_HANDLE, tt_tx_buf, 40U, 5U) != HAL_OK) {
+  if (HAL_UART_Transmit(&TT_UART_HANDLE, tt_tx_buf, 57U, 5U) != HAL_OK) {
     tt_status_tx_error_count++;
   }
   tt_tx_busy = 0U;
 }
 
 /*
- * ADC诊断查询回报帧，共40字节：
- *   A5 5A 05 19 标志
- *   U/V/W零点计数
- *   第二端点减第一端点的U/V/W电流
- *   ADC完整序列计数 FOC更新计数
- *   校验和 0D 0A
- *
- * 标志位0表示零点校准有效，位1表示正在等待第二端点样本。
- * 本帧只在收到A5 5A 05 19 1E 0D 0A查询时返回，不增加周期遥测负载。
+ * 电角度标定状态帧，共37字节：
+ *   A5 5A 05 21
+ *   active_mask last_action last_axis accepted
+ *   SP/FY当前机械角度 SP/FY运行时电角度偏置 SP/FY标定Ud给定
+ *   SP/FY功率状态
+ *   checksum 0D 0A
  */
-static void send_adc_diagnostic_report(void)
+static void send_electrical_calibration_report(void)
 {
   if (!Turntable_Comm_IsEnabled() || tt_tx_busy) {
     return;
   }
 
-  float offset[3];
-  float endpoint_delta[3];
-  uint32_t sequence_count;
-  uint32_t control_update_count;
-  uint8_t flags;
+  uint8_t active_mask = 0U;
+  if (FOC_IsElectricalCalibrationActive(FOC_AXIS_SP) != 0U) {
+    active_mask |= 0x01U;
+  }
+  if (FOC_IsElectricalCalibrationActive(FOC_AXIS_FY) != 0U) {
+    active_mask |= 0x02U;
+  }
+
+  tt_tx_buf[0] = TT_HEAD0;
+  tt_tx_buf[1] = TT_HEAD1;
+  tt_tx_buf[2] = TT_MODE_EXT;
+  tt_tx_buf[3] = TT_EXT_ELECTRICAL_CALIBRATION_REPORT;
+  tt_tx_buf[4] = active_mask;
+  tt_tx_buf[5] = tt_calibration_last_action;
+  tt_tx_buf[6] = tt_calibration_last_axis;
+  tt_tx_buf[7] = tt_calibration_last_accepted;
+  write_le_float(&tt_tx_buf[8], current_angle_sp);
+  write_le_float(&tt_tx_buf[12], current_angle_fy);
+  write_le_float(&tt_tx_buf[16], FOC_GetElectricalOffset(FOC_AXIS_SP));
+  write_le_float(&tt_tx_buf[20], FOC_GetElectricalOffset(FOC_AXIS_FY));
+  write_le_float(&tt_tx_buf[24], FOC_GetElectricalCalibrationUd(FOC_AXIS_SP));
+  write_le_float(&tt_tx_buf[28], FOC_GetElectricalCalibrationUd(FOC_AXIS_FY));
+  tt_tx_buf[32] = FOC_GetPowerState(FOC_AXIS_SP);
+  tt_tx_buf[33] = FOC_GetPowerState(FOC_AXIS_FY);
+  tt_tx_buf[34] = checksum_sum(tt_tx_buf, 2U, 34U);
+  tt_tx_buf[35] = TT_TAIL0;
+  tt_tx_buf[36] = TT_TAIL1;
+
+  tt_tx_busy = 1U;
+  if (HAL_UART_Transmit(&TT_UART_HANDLE, tt_tx_buf, 37U, 5U) != HAL_OK) {
+    tt_status_tx_error_count++;
+  }
+  tt_tx_busy = 0U;
+}
+
+/*
+ * ADC三相电流回报帧，共21字节：
+ *   A5 5A 05 19 轴号 校准状态 U/V/W电流(float) 校验和 0D 0A
+ * 查询帧为 A5 5A 05 19 轴号 checksum 0D 0A，共8字节。
+ * 重采零点帧为 A5 5A 05 19 轴号 01 checksum 0D 0A，共9字节。
+ */
+static void send_adc_diagnostic_report(uint8_t axis)
+{
+  if (!Turntable_Comm_IsEnabled() || tt_tx_busy) {
+    return;
+  }
+
+  float current[3];
+  const float *source = (axis == TT_AXIS_FY)
+                            ? g_adc_current_fy
+                            : g_adc_current_sp;
   const uint32_t primask = __get_PRIMASK();
   __disable_irq();
   for (uint32_t phase = 0U; phase < 3U; phase++) {
-    offset[phase] = g_adc_offset[phase];
-    endpoint_delta[phase] = g_adc_endpoint_delta_current[phase];
+    current[phase] = source[phase];
   }
-  sequence_count = g_adc_sequence_count;
-  control_update_count = g_adc_control_update_count;
-  flags = (g_adc_calibrated != 0U ? 0x01U : 0x00U) |
-          (g_adc_pair_pending != 0U ? 0x02U : 0x00U);
   if ((primask & 1U) == 0U) {
     __enable_irq();
   }
@@ -1169,21 +1295,19 @@ static void send_adc_diagnostic_report(void)
   tt_tx_buf[1] = TT_HEAD1;
   tt_tx_buf[2] = TT_MODE_EXT;
   tt_tx_buf[3] = TT_EXT_ADC_DIAGNOSTIC_REPORT;
-  tt_tx_buf[4] = flags;
-  write_le_float(&tt_tx_buf[5], offset[0]);
-  write_le_float(&tt_tx_buf[9], offset[1]);
-  write_le_float(&tt_tx_buf[13], offset[2]);
-  write_le_float(&tt_tx_buf[17], endpoint_delta[0]);
-  write_le_float(&tt_tx_buf[21], endpoint_delta[1]);
-  write_le_float(&tt_tx_buf[25], endpoint_delta[2]);
-  write_le_u32(&tt_tx_buf[29], sequence_count);
-  write_le_u32(&tt_tx_buf[33], control_update_count);
-  tt_tx_buf[37] = checksum_sum(tt_tx_buf, 2U, 37U);
-  tt_tx_buf[38] = TT_TAIL0;
-  tt_tx_buf[39] = TT_TAIL1;
+  tt_tx_buf[4] = axis;
+  tt_tx_buf[5] = (axis == TT_AXIS_FY)
+                     ? g_adc_calibrated_fy
+                     : g_adc_calibrated_sp;
+  write_le_float(&tt_tx_buf[6], current[0]);
+  write_le_float(&tt_tx_buf[10], current[1]);
+  write_le_float(&tt_tx_buf[14], current[2]);
+  tt_tx_buf[18] = checksum_sum(tt_tx_buf, 2U, 18U);
+  tt_tx_buf[19] = TT_TAIL0;
+  tt_tx_buf[20] = TT_TAIL1;
 
   tt_tx_busy = 1U;
-  if (HAL_UART_Transmit(&TT_UART_HANDLE, tt_tx_buf, 40U, 5U) != HAL_OK) {
+  if (HAL_UART_Transmit(&TT_UART_HANDLE, tt_tx_buf, 21U, 5U) != HAL_OK) {
     tt_status_tx_error_count++;
   }
   tt_tx_busy = 0U;
