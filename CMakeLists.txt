@@ -43,6 +43,8 @@ add_executable(${CMAKE_PROJECT_NAME}
         Lib/Src/adc_fy.c
         Lib/Src/turntable_comm.c
         Lib/Inc/turntable_comm.h
+        Lib/Src/tracking.c
+        Lib/Inc/tracking.h
         Experiments/Src/Experiment_Control.c
         Experiments/Src/Experiment_Baseline.c
         Experiments/Src/Experiment_ESO.c

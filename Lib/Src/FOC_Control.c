@@ -102,6 +102,8 @@ static uint32_t previous_control_cycle_count_sp = 0U;
 static uint32_t previous_control_cycle_count_fy = 0U;
 static uint8_t control_cycle_counter_valid_sp = 0U;
 static uint8_t control_cycle_counter_valid_fy = 0U;
+static uint8_t fy_soft_limit_blocked = 0U;
+static int8_t fy_soft_limit_direction = 0;
 
 static uint32_t measure_control_elapsed_us(FOC_Axis axis)
 {
@@ -150,6 +152,97 @@ static float shortest_angle_error_deg(float target_deg, float actual_deg)
     error += 360.0f;
   }
   return error - 180.0f;
+}
+
+static float normalize_angle_deg(float angle_deg)
+{
+  float angle = fmodf(angle_deg, 360.0f);
+  if (angle < 0.0f) {
+    angle += 360.0f;
+  }
+  return angle;
+}
+
+static uint8_t fy_angle_inside_limit(float angle_deg);
+
+static float clamp_fy_target_deg(float target_deg)
+{
+  const float target = normalize_angle_deg(target_deg);
+  if (fy_angle_inside_limit(target) != 0U) {
+    return target;
+  }
+  const float forward_to_min =
+      normalize_angle_deg(FY_SOFT_LIMIT_MIN_DEG - target);
+  const float backward_to_max =
+      normalize_angle_deg(target - FY_SOFT_LIMIT_MAX_DEG);
+  return (forward_to_min <= backward_to_max)
+             ? FY_SOFT_LIMIT_MIN_DEG
+             : FY_SOFT_LIMIT_MAX_DEG;
+}
+
+static uint8_t fy_angle_inside_limit(float angle_deg)
+{
+  const float angle = normalize_angle_deg(angle_deg);
+  if (FY_SOFT_LIMIT_MIN_DEG <= FY_SOFT_LIMIT_MAX_DEG) {
+    return ((angle >= FY_SOFT_LIMIT_MIN_DEG) &&
+            (angle <= FY_SOFT_LIMIT_MAX_DEG)) ? 1U : 0U;
+  }
+  return ((angle >= FY_SOFT_LIMIT_MIN_DEG) ||
+          (angle <= FY_SOFT_LIMIT_MAX_DEG)) ? 1U : 0U;
+}
+
+static float fy_position_error_deg(float target_deg, float actual_deg)
+{
+  const float actual = normalize_angle_deg(actual_deg);
+  if (fy_angle_inside_limit(actual) != 0U) {
+    const float target_position = normalize_angle_deg(
+        clamp_fy_target_deg(target_deg) - FY_SOFT_LIMIT_MIN_DEG);
+    const float actual_position =
+        normalize_angle_deg(actual - FY_SOFT_LIMIT_MIN_DEG);
+    return target_position - actual_position;
+  }
+
+  /* 已在禁区时，先沿较短方向退回最近的限位边界。 */
+  const float forward_to_min =
+      normalize_angle_deg(FY_SOFT_LIMIT_MIN_DEG - actual);
+  const float backward_to_max =
+      normalize_angle_deg(actual - FY_SOFT_LIMIT_MAX_DEG);
+  return (forward_to_min <= backward_to_max)
+             ? forward_to_min
+             : -backward_to_max;
+}
+
+static uint8_t fy_speed_is_outward(float target_rpm, float actual_deg)
+{
+  const float actual = normalize_angle_deg(actual_deg);
+  if (fy_angle_inside_limit(actual) != 0U) {
+    const float limit_length = normalize_angle_deg(
+        FY_SOFT_LIMIT_MAX_DEG - FY_SOFT_LIMIT_MIN_DEG);
+    const float actual_position =
+        normalize_angle_deg(actual - FY_SOFT_LIMIT_MIN_DEG);
+    if ((actual_position <= 0.0f) && (target_rpm < 0.0f)) {
+      fy_soft_limit_direction = -1;
+      return 1U;
+    }
+    if ((actual_position >= limit_length) && (target_rpm > 0.0f)) {
+      fy_soft_limit_direction = 1;
+      return 1U;
+    }
+    fy_soft_limit_direction = 0;
+    return 0U;
+  }
+
+  if (fy_soft_limit_direction == 0) {
+    const float forward_to_min =
+        normalize_angle_deg(FY_SOFT_LIMIT_MIN_DEG - actual);
+    const float backward_to_max =
+        normalize_angle_deg(actual - FY_SOFT_LIMIT_MAX_DEG);
+    fy_soft_limit_direction = (forward_to_min <= backward_to_max) ? -1 : 1;
+  }
+  return (((fy_soft_limit_direction < 0) && (target_rpm < 0.0f)) ||
+          ((fy_soft_limit_direction > 0) && (target_rpm > 0.0f)))
+             ? 1U
+             : 0U;
 }
 
 static void restore_interrupt_state(uint32_t primask)
@@ -238,6 +331,8 @@ static void reset_control_state(FOC_Axis axis)
     ssi_request_count_fy = 0U;
     speed_loop_elapsed_us_fy = 0U;
     control_cycle_counter_valid_fy = 0U;
+    fy_soft_limit_blocked = 0U;
+    fy_soft_limit_direction = 0;
   } else {
     PID_Reset(&position_pid_inst_sp);
     PID_Reset(&speed_pid_inst_sp);
@@ -336,7 +431,7 @@ void FOC_SetPositionTarget(FOC_Axis axis, float target_deg)
       PID_Reset(&speed_pid_inst_fy);
     }
     electrical_calibration_active_fy = 0U;
-    position_given_fy = target_deg;
+    position_given_fy = clamp_fy_target_deg(target_deg);
     foc_control_mode_fy = FOC_CONTROL_MODE_POSITION;
     foc_position_target_valid_fy = 1U;
   } else {
@@ -495,12 +590,28 @@ void Control_Loop(FOC_Axis axis)
 
     if (*calibration_active == 0U) {
       if (*control_mode == FOC_CONTROL_MODE_POSITION) {
-        const float position_error =
-            shortest_angle_error_deg(*position_given, *current_angle);
+        const float position_error = is_fy
+                                         ? fy_position_error_deg(
+                                               *position_given,
+                                               *current_angle)
+                                         : shortest_angle_error_deg(
+                                               *position_given,
+                                               *current_angle);
         *speed_given = PID_Update(position_pid, position_error, current_time);
       }
+      float limited_speed_given = *speed_given;
+      if (is_fy &&
+          (fy_speed_is_outward(limited_speed_given, *current_angle) != 0U)) {
+        limited_speed_given = 0.0f;
+        if (fy_soft_limit_blocked == 0U) {
+          PID_Reset(speed_pid);
+          fy_soft_limit_blocked = 1U;
+        }
+      } else if (is_fy) {
+        fy_soft_limit_blocked = 0U;
+      }
       const float feedback_iq = PID_Update(
-          speed_pid, *speed_given - *current_speed, current_time);
+          speed_pid, limited_speed_given - *current_speed, current_time);
       *iq_given = is_fy
                       ? feedback_iq
                       : Experiment_Control_Update(*current_angle,

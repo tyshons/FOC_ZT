@@ -31,6 +31,7 @@
 #include "FOC_Control.h"
 #include "PID_Control.h"
 #include "turntable_comm.h"
+#include "tracking.h"
 #include "Experiment_Control.h"
 /* USER CODE END Includes */
 
@@ -112,6 +113,7 @@ int main(void)
   Motor_Disable(FOC_AXIS_SP);
   Motor_Disable(FOC_AXIS_FY);
   Turntable_Comm_Init();
+  Tracking_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -123,6 +125,7 @@ int main(void)
     /* USER CODE BEGIN 3 */
     Experiment_Control_Background();
     Turntable_Comm_Task();
+    Tracking_Task();
 
   }
   /* USER CODE END 3 */

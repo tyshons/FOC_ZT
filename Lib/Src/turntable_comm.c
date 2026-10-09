@@ -8,6 +8,7 @@
 #include "Experiment_ESO.h"
 #include "Experiment_LearningFeedforward.h"
 #include "ssi.h"
+#include "tracking.h"
 #include "usart.h"
 
 #include <math.h>
@@ -35,6 +36,8 @@
 #define TT_FUNC_PID     0x00U
 #define TT_FUNC_ANGLE   0x01U
 #define TT_FUNC_SPEED   0x02U
+#define TT_TRACK_FUNC_PID    0x03U
+#define TT_TRACK_FUNC_ENABLE 0x04U
 
 #define TT_EXT_PID_QUERY  0x10U
 #define TT_EXT_PID_REPORT 0x11U
@@ -219,6 +222,17 @@ static PID_TypeDef *pid_from_axis_loop(uint8_t axis, uint8_t loop)
   }
 }
 
+static PID_TypeDef *pid_from_mode_axis_loop(uint8_t mode,
+                                            uint8_t axis,
+                                            uint8_t loop)
+{
+  if ((mode == TT_MODE_TRACK) && (loop == 0x02U) &&
+      (axis_is_valid(axis) != 0U)) {
+    return Tracking_GetPid(foc_axis_from_protocol(axis));
+  }
+  return pid_from_axis_loop(axis, loop);
+}
+
 static void apply_axis_angle(uint8_t axis, float target_deg)
 {
   if ((axis_is_valid(axis) != 0U) && isfinite(target_deg)) {
@@ -226,13 +240,14 @@ static void apply_axis_angle(uint8_t axis, float target_deg)
   }
 }
 
-static void apply_pid(uint8_t axis, uint8_t loop, float kp, float ki, float kd)
+static void apply_pid(uint8_t mode, uint8_t axis, uint8_t loop,
+                      float kp, float ki, float kd)
 {
   if ((axis_is_valid(axis) == 0U) ||
       !isfinite(kp) || !isfinite(ki) || !isfinite(kd)) {
     return;
   }
-  PID_TypeDef *pid = pid_from_axis_loop(axis, loop);
+  PID_TypeDef *pid = pid_from_mode_axis_loop(mode, axis, loop);
   if (pid == NULL) {
     return;
   }
@@ -283,7 +298,7 @@ static void handle_servo_frame(const uint8_t *frame, uint8_t len)
     float kp = read_le_float(&frame[6]);
     float ki = read_le_float(&frame[10]);
     float kd = read_le_float(&frame[14]);
-    apply_pid(axis, loop, kp, ki, kd);
+    apply_pid(TT_MODE_SERVO, axis, loop, kp, ki, kd);
   } else if (func == TT_FUNC_ANGLE) {
     if (len == 15U) {
       float az_target = read_le_float(&frame[4]);
@@ -319,13 +334,15 @@ static void handle_tracking_frame(const uint8_t *frame, uint8_t len)
   }
 
   uint8_t func = frame[3];
-  if (func == 0x03U && len == 21U) {
+  if (func == TT_TRACK_FUNC_PID && len == 21U) {
     uint8_t axis = frame[4];
     uint8_t loop = frame[5];
     float kp = read_le_float(&frame[6]);
     float ki = read_le_float(&frame[10]);
     float kd = read_le_float(&frame[14]);
-    apply_pid(axis, loop, kp, ki, kd);
+    apply_pid(TT_MODE_TRACK, axis, loop, kp, ki, kd);
+  } else if (func == TT_TRACK_FUNC_ENABLE && len == 8U) {
+    Tracking_SetEnabled(frame[4]);
   } else if (func <= 0x02U && len == 8U) {
     apply_feature(&tt_tracking_features, func, frame[4]);
   }
@@ -333,7 +350,7 @@ static void handle_tracking_frame(const uint8_t *frame, uint8_t len)
 
 static void send_pid_report(uint8_t pid_mode, uint8_t axis, uint8_t loop)
 {
-  PID_TypeDef *pid = pid_from_axis_loop(axis, loop);
+  PID_TypeDef *pid = pid_from_mode_axis_loop(pid_mode, axis, loop);
   if ((pid == NULL) || tt_tx_busy) {
     return;
   }
@@ -1495,11 +1512,13 @@ void Turntable_Comm_UartErrorCallback(UART_HandleTypeDef *huart)
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
   Turntable_Comm_UartRxCpltCallback(huart);
+  Tracking_UartRxCpltCallback(huart);
 }
 
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t size)
 {
   Turntable_Comm_UartRxEventCallback(huart, size);
+  Tracking_UartRxEventCallback(huart, size);
 }
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
@@ -1510,4 +1529,5 @@ void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
   Turntable_Comm_UartErrorCallback(huart);
+  Tracking_UartErrorCallback(huart);
 }
